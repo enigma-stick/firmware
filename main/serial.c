@@ -51,7 +51,7 @@ void km_sz_str(km_serializer_t *sz, const char *x) {
 
 inline void km_sz_bool(km_serializer_t *sz, bool x) { km_sz_u8(sz, x); }
 
-km_deserializer_t *km_dz_init_copy(uint8_t *data, size_t len) {
+km_deserializer_t *km_dz_init_copy(const uint8_t *data, size_t len) {
   km_deserializer_t *inst =
       (km_deserializer_t *)malloc(sizeof(km_deserializer_t));
 
@@ -121,7 +121,8 @@ bool km_dz_u32(km_deserializer_t *dz, uint32_t *out) {
   uint8_t d = dz->data[dz->cursor++];
 
   if (out != NULL)
-    *out = (uint32_t)((uint32_t)a << 24 | (uint32_t)b << 16 | (uint32_t)c << 8 | (uint32_t)d);
+    *out = (uint32_t)((uint32_t)a << 24 | (uint32_t)b << 16 | (uint32_t)c << 8 |
+                      (uint32_t)d);
   return true;
 }
 

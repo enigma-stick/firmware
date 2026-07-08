@@ -11,6 +11,9 @@
 
 enum km_command_type {
   km_command_ping = 0x01,
+  km_command_generate_key = 0x20,
+  km_command_public_key = 0x21,
+  km_command_sign = 0x22
 };
 
 enum km_command_response_type {

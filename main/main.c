@@ -1,3 +1,4 @@
+#include "crypto.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,6 +16,9 @@ void app_main(void) {
 
   // Set up storage
   km_store_init();
+
+  // Set up crypto
+  km_crypto_init();
 
   // Set up lights
   km_led_init(&led_red, 1);
