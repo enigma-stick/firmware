@@ -1,0 +1,9 @@
+CompileFlags:
+    CompilationDatabase: build
+    Remove:
+      - -fno-malloc-dce
+      - -fno-shrink-wrap
+      - -fzero-init-padding-bits=*
+      - -fstrict-volatile-bitfields
+      - -fno-tree-switch-conversion
+      - -mtune=esp-base
