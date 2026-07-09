@@ -132,7 +132,8 @@ bool km_keys_add_key(km_key_metadata_t *metadata) {
                                                  key_length);
 
   // Copy metadata
-  km_key_metadata_t *target_key = keys[key_length - 1];
+  km_key_metadata_t *target_key = malloc(sizeof(km_key_metadata_t));
+  keys[key_length - 1] = target_key;
   target_key->slot = metadata->slot;
   target_key->type = metadata->type;
   target_key->size = metadata->size;
@@ -140,8 +141,9 @@ bool km_keys_add_key(km_key_metadata_t *metadata) {
 
   // Deep copy the label since we free it later
   size_t label_len = strlen(metadata->label);
-  target_key->label = malloc(sizeof(char) * label_len);
+  target_key->label = malloc(sizeof(char) * label_len + 1);
   strncpy(target_key->label, metadata->label, label_len);
+  target_key->label[label_len] = '\0';
 
   // The serializer malloc's for us
   uint8_t *payload;

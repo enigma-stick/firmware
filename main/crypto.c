@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "mbedtls/psa_util.h"
 #include "psa/crypto.h"
+#include "psa/crypto_sizes.h"
 #include "psa/crypto_struct.h"
 #include "psa/crypto_types.h"
 #include "psa/crypto_values.h"
@@ -53,6 +54,7 @@ bool km_crypto_handle_generate(km_key_generate_params_t params,
   switch (params.type) {
   case km_key_type_ecc:
     if (!km_crypto_generate_ecc(params.size, &key)) {
+      ESP_LOGE(TAG, "Error generating ECC key");
       return false;
     }
     break;
@@ -61,5 +63,66 @@ bool km_crypto_handle_generate(km_key_generate_params_t params,
   }
 
   *out = key;
+  return true;
+}
+
+bool km_crypto_export_public_key(km_key_metadata_t metadata, uint8_t **out,
+                                 size_t *len) {
+  size_t to_alloc = 0;
+  switch (metadata.type) {
+  case km_key_type_ecc:
+    to_alloc = PSA_EXPORT_PUBLIC_KEY_OUTPUT_SIZE(
+        PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1), metadata.size);
+    break;
+  default:
+    ESP_LOGE(TAG, "Key type not supported");
+    return false;
+  }
+
+  uint8_t *buffer = malloc(sizeof(uint8_t) * to_alloc);
+  if (!buffer) {
+    ESP_LOGE(TAG, "Unable to allocate enough memory to export public key");
+    return false;
+  }
+
+  size_t actual_size;
+  psa_status_t err =
+      psa_export_public_key(metadata.slot, buffer, to_alloc, &actual_size);
+  if (err != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Error exporting public key");
+    free(buffer);
+    return false;
+  }
+
+  *out = buffer;
+  *len = actual_size;
+
+  return true;
+}
+
+bool km_crypto_sign(km_key_metadata_t metadata, uint8_t *digest,
+                    uint8_t **out) {
+
+  psa_algorithm_t alg;
+  switch (metadata.type) {
+  case km_key_type_ecc:
+    alg = PSA_ALG_ECDSA(PSA_ALG_SHA_256);
+    break;
+  default:
+    ESP_LOGE(TAG, "Unsupported key type");
+    return false;
+  }
+
+  // TODO: this needs to be more generalized, but fine for a first pass.
+  uint8_t *signature = malloc(sizeof(uint8_t) * 64);
+  size_t signature_length = 0;
+  psa_status_t err = psa_sign_hash(metadata.slot, alg, digest, 32, signature,
+                                   64, &signature_length);
+  if (err != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not sign hash");
+    return false;
+  }
+
+  *out = signature;
   return true;
 }

@@ -19,6 +19,8 @@ enum km_command_type {
 enum km_command_response_type {
   km_command_response_error = 0xFF,
   km_command_response_ok = 0x00,
+  km_command_response_public_key = 0x21,
+  km_command_response_sign = 0x22
 };
 
 typedef struct _frame_header {
