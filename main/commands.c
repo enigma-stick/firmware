@@ -167,11 +167,14 @@ void km_commands_handle(const km_frame_header_t *frame_header,
     if (command.slot != 0) {
       slot = command.slot;
     } else {
-      if (!km_keys_find_label(command.label, &slot)) {
+      km_key_metadata_t key;
+      if (!km_keys_find_label(command.label, &key)) {
         free(command.label);
         km_usb_write_error("Could not find key by given label");
         break;
       }
+      slot = key.slot;
+      free(key.label);
     }
 
     km_key_metadata_t metadata;
@@ -227,11 +230,14 @@ void km_commands_handle(const km_frame_header_t *frame_header,
     if (command.slot != 0) {
       slot = command.slot;
     } else {
-      if (!km_keys_find_label(command.label, &slot)) {
+      km_key_metadata_t key;
+      if (!km_keys_find_label(command.label, &key)) {
         free(command.label);
         km_usb_write_error("Could not find key by given label");
         break;
       }
+      slot = key.slot;
+      free(key.label);
     }
 
     km_key_metadata_t metadata;

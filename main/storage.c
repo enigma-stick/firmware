@@ -43,26 +43,27 @@ void *km_store_read(const char *key, size_t *len) {
   return raw_data;
 }
 
-void km_store_write(const char *key, const void *value, size_t len) {
+bool km_store_write(const char *key, const void *value, size_t len) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(NAMESPACE, NVS_READWRITE, &handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "write: Could not open NVS handle");
-    return;
+    return false;
   }
 
   err = nvs_set_blob(handle, key, value, len);
   if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
     ESP_LOGE(TAG, "write: Could not write NVS blob");
     nvs_close(handle);
-    return;
+    return false;
   }
 
   err = nvs_commit(handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "write: Could not commit to NVS store");
-    return;
+    return false;
   }
 
   nvs_close(handle);
+  return true;
 }

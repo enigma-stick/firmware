@@ -1,18 +1,24 @@
 #include "keys.h"
+#include "esp_log.h"
 #include "serial.h"
 #include "storage.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-bool key_metadata_dz_single(km_deserializer_t *dz, km_key_metadata_t **out) {
-  km_key_metadata_t *meta = malloc(sizeof(km_key_metadata_t));
+#define KEYMGR_KEYS_MAIN_INDEX "key:index"
+#define KEYMGR_KEYS_SLOT_INDEX "key:%lu"
 
-  if (!km_dz_u32(dz, &meta->slot) || !km_dz_str(dz, &meta->label) ||
-      !km_dz_u8(dz, &meta->type) || !km_dz_u16(dz, &meta->size) ||
-      !km_dz_u32(dz, &meta->created_at)) {
-    free(meta);
+static const char *TAG = "keymgr_keys";
+
+bool key_metadata_deserialize(km_deserializer_t *dz, km_key_metadata_t *out) {
+  km_key_metadata_t meta;
+
+  if (!km_dz_u32(dz, &meta.slot) || !km_dz_str(dz, &meta.label) ||
+      !km_dz_u8(dz, &meta.type) || !km_dz_u16(dz, &meta.size) ||
+      !km_dz_u32(dz, &meta.created_at)) {
     return false;
   }
 
@@ -20,7 +26,7 @@ bool key_metadata_dz_single(km_deserializer_t *dz, km_key_metadata_t **out) {
   return true;
 }
 
-void key_metadata_sz_single(km_serializer_t *sz, km_key_metadata_t *in) {
+void key_metadata_serialize(km_serializer_t *sz, km_key_metadata_t *in) {
   km_sz_u32(sz, in->slot);
   km_sz_str(sz, in->label);
   km_sz_u8(sz, in->type);
@@ -28,134 +34,142 @@ void key_metadata_sz_single(km_serializer_t *sz, km_key_metadata_t *in) {
   km_sz_u32(sz, in->created_at);
 }
 
-km_key_metadata_t **key_metadata_deserialize(uint8_t *payload, size_t len,
-                                             size_t *array_length) {
-  km_deserializer_t *dz = km_dz_init_copy(payload, len);
-
-  uint32_t array_size;
-  km_dz_u32(dz, &array_size);
-
-  km_key_metadata_t **array = malloc(sizeof(km_key_metadata_t *) * array_size);
-  km_dz_array(key_metadata_dz_single, dz, array, array_size);
-
-  *array_length = array_size;
-
-  km_dz_free(dz);
-  return array;
-}
-
-size_t key_metadata_serialize(km_key_metadata_t **metadata, size_t len,
-                              uint8_t **out) {
-  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_array(key_metadata_sz_single, sz, metadata, len);
-  // TODO: capture errors
-
-  *out = malloc(sizeof(uint8_t) * sz->len);
-  memcpy(*out, sz->data, sz->len);
-
-  size_t out_len = sz->len;
-  km_sz_free(sz);
-
-  return out_len;
-}
-
-void key_metadata_array_free(km_key_metadata_t **array, size_t len) {
-  for (int i = 0; i < len; i++) {
-    free(array[i]->label);
-    free(array[i]);
-  }
-  free(array);
-}
-
-km_key_metadata_t **load_key_metadata(size_t *len) {
-  size_t blob_size = 0;
-  uint8_t *blob = (uint8_t *)km_store_read("key_index", &blob_size);
-
-  if (blob_size == 0) {
-    *len = 0;
-    return malloc(sizeof(km_key_metadata_t *));
+bool key_store_deserialize(km_deserializer_t *dz, km_key_store_t *out) {
+  uint32_t size = 0;
+  if (!km_dz_u32(dz, &size)) {
+    return false;
   }
 
-  size_t key_length;
-  km_key_metadata_t **keys =
-      key_metadata_deserialize(blob, blob_size, &key_length);
+  out->count = size;
+  out->slots = malloc(sizeof(km_slot_t) * size == 0 ? 1 : size);
+  km_dz_array(km_dz_u32, dz, out->slots, size);
 
-  *len = key_length;
-  return keys;
+  return true;
 }
 
-bool km_keys_find_label(const char *label, km_slot_t *out) {
-  size_t key_length;
-  km_key_metadata_t **keys = load_key_metadata(&key_length);
-
-  for (int i = 0; i < key_length; i++) {
-    if (!strcmp(keys[i]->label, label)) {
-      *out = keys[i]->slot;
-      key_metadata_array_free(keys, key_length);
-      return true;
-    }
-  }
-
-  key_metadata_array_free(keys, key_length);
-  return false;
+void key_store_serialize(km_serializer_t *sz, km_key_store_t *in) {
+  km_sz_array(km_sz_u32, sz, in->slots, in->count);
 }
 
-// NOTE: currently very redundant vs km_keys_find_label but when the
-// secure element is actually on board, this becomes an I2C operation.
 bool km_keys_get_meta(km_slot_t slot, km_key_metadata_t *out) {
-  size_t key_length;
-  km_key_metadata_t **keys = load_key_metadata(&key_length);
+  char lookup[32];
+  size_t n = snprintf(lookup, 32, KEYMGR_KEYS_SLOT_INDEX, slot);
+  lookup[n] = '\0';
 
-  for (int i = 0; i < key_length; i++) {
-    if (keys[i]->slot == slot) {
-      *out = *keys[i];
-      size_t label_len = strlen(keys[i]->label);
-      out->label = malloc(sizeof(char) * (label_len + 1));
-      strncpy(out->label, keys[i]->label, label_len);
-      out->label[label_len] = '\0';
-      key_metadata_array_free(keys, key_length);
-      return true;
-    }
+  size_t index_size = 0;
+  uint8_t *index = km_store_read(lookup, &index_size);
+  if (index == NULL) {
+    ESP_LOGE(TAG, "Key does not exist with that slot ID");
+    return false;
   }
 
-  key_metadata_array_free(keys, key_length);
+  km_deserializer_t *dz = km_dz_init_copy(index, index_size);
+  km_key_metadata_t metadata;
+  if (!key_metadata_deserialize(dz, &metadata)) {
+    ESP_LOGE(TAG, "Could not deserialize key metadata");
+    km_dz_free(dz);
+    return false;
+  }
+
+  *out = metadata;
+  km_dz_free(dz);
+  return true;
+}
+
+bool km_keys_find_label(const char *label, km_key_metadata_t *out) {
+  // Read index from NVS
+  // TODO: put this in a function
+  size_t index_size = 0;
+  uint8_t *index_buffer = km_store_read(KEYMGR_KEYS_MAIN_INDEX, &index_size);
+
+  // Deserialize the index
+  km_key_store_t index;
+  km_deserializer_t *dz = km_dz_init_copy(index_buffer, index_size);
+  if (!key_store_deserialize(dz, &index)) {
+    ESP_LOGE(TAG, "Could not deserialize key index");
+    return false;
+  }
+
+  for (int i = 0; i < index.count; i++) {
+    km_key_metadata_t key;
+    km_keys_get_meta(index.slots[i], &key);
+
+    if (!strcmp(key.label, label)) {
+      *out = key;
+      return true;
+    }
+
+    free(key.label);
+  }
+
   return false;
+}
+
+void write_to_key_slot_store(km_key_metadata_t *metadata) {
+  char key_buffer[32];
+  size_t n = snprintf(key_buffer, 32, KEYMGR_KEYS_SLOT_INDEX, metadata->slot);
+  key_buffer[n] = '\0';
+
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  key_metadata_serialize(sz, metadata);
+  if (!km_store_write(key_buffer, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not persist key metadata");
+  }
+  km_sz_free(sz);
+}
+
+void km_keys_init_storage() {
+  size_t len;
+  if (km_store_read(KEYMGR_KEYS_MAIN_INDEX, &len) != NULL) {
+    ESP_LOGI(TAG, "Key index already initialized.");
+    return;
+  }
+  ESP_LOGI(TAG, "Key index not initialized... initializing now...");
+
+  km_key_store_t index;
+  index.count = 0;
+
+  km_serializer_t *sz = km_sz_init(4);
+  key_store_serialize(sz, &index);
+
+  if (!km_store_write(KEYMGR_KEYS_MAIN_INDEX, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not initialize key index in NVS");
+    return;
+  }
+
+  ESP_LOGI(TAG, "Key index initialized.");
+  return;
 }
 
 bool km_keys_add_key(km_key_metadata_t *metadata) {
-  size_t key_length;
-  km_key_metadata_t **keys = load_key_metadata(&key_length);
+  // Read index from NVS
+  size_t index_size = 0;
+  uint8_t *index_buffer = km_store_read(KEYMGR_KEYS_MAIN_INDEX, &index_size);
 
-  // More memory!
-  key_length++;
-  keys = (km_key_metadata_t **)realloc(keys, sizeof(km_key_metadata_t *) *
-                                                 key_length);
+  // Deserialize the index
+  km_key_store_t index;
+  km_deserializer_t *dz = km_dz_init_copy(index_buffer, index_size);
+  if (!key_store_deserialize(dz, &index)) {
+    ESP_LOGE(TAG, "Could not deserialize key index");
+    return false;
+  }
 
-  // Copy metadata
-  km_key_metadata_t *target_key = malloc(sizeof(km_key_metadata_t));
-  keys[key_length - 1] = target_key;
-  target_key->slot = metadata->slot;
-  target_key->type = metadata->type;
-  target_key->size = metadata->size;
-  target_key->created_at = metadata->created_at;
+  // Increment the key count and add slot to the list
+  index.count++;
+  index.slots = realloc(index.slots, sizeof(km_slot_t) * index.count);
+  index.slots[index.count - 1] = metadata->slot;
 
-  // Deep copy the label since we free it later
-  size_t label_len = strlen(metadata->label);
-  target_key->label = malloc(sizeof(char) * label_len + 1);
-  strncpy(target_key->label, metadata->label, label_len);
-  target_key->label[label_len] = '\0';
+  // Serialize the index and write back to NVS
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  key_store_serialize(sz, &index);
+  if (!km_store_write(KEYMGR_KEYS_MAIN_INDEX, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not persist key index");
+    return false;
+  }
 
-  // The serializer malloc's for us
-  uint8_t *payload;
-  size_t payload_length = key_metadata_serialize(keys, key_length, &payload);
+  write_to_key_slot_store(metadata);
 
-  // Write
-  km_store_write("key_index", payload, payload_length);
-
-  // Clean up
-  free(payload);
-  key_metadata_array_free(keys, key_length);
-
-  // Done
+  // All done
+  free(index.slots);
   return true;
 }

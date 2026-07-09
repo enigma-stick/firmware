@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "keys.h"
 #include "led.h"
 #include "storage.h"
 #include "usb_transport.h"
@@ -16,6 +17,7 @@ void app_main(void) {
 
   // Set up storage
   km_store_init();
+  km_keys_init_storage();
 
   // Set up crypto
   km_crypto_init();
