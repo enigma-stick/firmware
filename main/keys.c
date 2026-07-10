@@ -1,5 +1,6 @@
 #include "keys.h"
 #include "esp_log.h"
+#include "memory.h"
 #include "serial.h"
 #include "storage.h"
 #include <stddef.h>
@@ -13,10 +14,11 @@
 
 static const char *TAG = "keymgr_keys";
 
-bool key_metadata_deserialize(km_deserializer_t *dz, km_key_metadata_t *out) {
+bool key_metadata_deserialize(km_memory_pool_t *pool, km_deserializer_t *dz,
+                              km_key_metadata_t *out) {
   km_key_metadata_t meta;
 
-  if (!km_dz_u32(dz, &meta.slot) || !km_dz_str(dz, &meta.label) ||
+  if (!km_dz_u32(dz, &meta.slot) || !km_dz_str(pool, dz, &meta.label) ||
       !km_dz_u8(dz, &meta.type) || !km_dz_u16(dz, &meta.size) ||
       !km_dz_u32(dz, &meta.created_at)) {
     return false;
@@ -34,14 +36,16 @@ void key_metadata_serialize(km_serializer_t *sz, km_key_metadata_t *in) {
   km_sz_u32(sz, in->created_at);
 }
 
-bool key_store_deserialize(km_deserializer_t *dz, km_key_store_t *out) {
+bool key_store_deserialize(km_memory_pool_t *pool, km_deserializer_t *dz,
+                           km_key_store_t *out) {
   uint32_t size = 0;
   if (!km_dz_u32(dz, &size)) {
     return false;
   }
 
   out->count = size;
-  out->slots = malloc(sizeof(km_slot_t) * size == 0 ? 1 : size);
+  out->slots =
+      km_memory_alloc(pool, sizeof(km_slot_t) * (size == 0 ? 1 : size));
   km_dz_array(km_dz_u32, dz, out->slots, size);
 
   return true;
@@ -51,55 +55,57 @@ void key_store_serialize(km_serializer_t *sz, km_key_store_t *in) {
   km_sz_array(km_sz_u32, sz, in->slots, in->count);
 }
 
-bool km_keys_get_meta(km_slot_t slot, km_key_metadata_t *out) {
+bool km_keys_get_meta(km_memory_pool_t *pool, km_slot_t slot,
+                      km_key_metadata_t *out) {
   char lookup[32];
-  size_t n = snprintf(lookup, 32, KEYMGR_KEYS_SLOT_INDEX, slot);
+  size_t n = snprintf(lookup, 32, KEYMGR_KEYS_SLOT_INDEX, (unsigned long)slot);
   lookup[n] = '\0';
 
   size_t index_size = 0;
-  uint8_t *index = km_store_read(lookup, &index_size);
+  uint8_t *index = km_store_read(pool, lookup, &index_size);
   if (index == NULL) {
     ESP_LOGE(TAG, "Key does not exist with that slot ID");
     return false;
   }
 
-  km_deserializer_t *dz = km_dz_init_copy(index, index_size);
+  km_deserializer_t *dz = km_dz_init_copy(pool, index, index_size);
   km_key_metadata_t metadata;
-  if (!key_metadata_deserialize(dz, &metadata)) {
+  if (!key_metadata_deserialize(pool, dz, &metadata)) {
     ESP_LOGE(TAG, "Could not deserialize key metadata");
-    km_dz_free(dz);
     return false;
   }
 
   *out = metadata;
-  km_dz_free(dz);
   return true;
 }
 
-bool km_keys_find_label(const char *label, km_key_metadata_t *out) {
+bool km_keys_find_label(km_memory_pool_t *pool, const char *label,
+                        km_key_metadata_t *out) {
   // Read index from NVS
   // TODO: put this in a function
   size_t index_size = 0;
-  uint8_t *index_buffer = km_store_read(KEYMGR_KEYS_MAIN_INDEX, &index_size);
+  uint8_t *index_buffer =
+      km_store_read(pool, KEYMGR_KEYS_MAIN_INDEX, &index_size);
 
   // Deserialize the index
   km_key_store_t index;
-  km_deserializer_t *dz = km_dz_init_copy(index_buffer, index_size);
-  if (!key_store_deserialize(dz, &index)) {
+  km_deserializer_t *dz = km_dz_init_copy(pool, index_buffer, index_size);
+  if (!key_store_deserialize(pool, dz, &index)) {
     ESP_LOGE(TAG, "Could not deserialize key index");
     return false;
   }
 
   for (int i = 0; i < index.count; i++) {
     km_key_metadata_t key;
-    km_keys_get_meta(index.slots[i], &key);
+    if (!km_keys_get_meta(pool, index.slots[i], &key)) {
+      ESP_LOGE(TAG, "Failed to read from slot %lu", index.slots[i]);
+      return false;
+    }
 
     if (!strcmp(key.label, label)) {
       *out = key;
       return true;
     }
-
-    free(key.label);
   }
 
   return false;
@@ -107,7 +113,8 @@ bool km_keys_find_label(const char *label, km_key_metadata_t *out) {
 
 void write_to_key_slot_store(km_key_metadata_t *metadata) {
   char key_buffer[32];
-  size_t n = snprintf(key_buffer, 32, KEYMGR_KEYS_SLOT_INDEX, metadata->slot);
+  size_t n = snprintf(key_buffer, 32, KEYMGR_KEYS_SLOT_INDEX,
+                      (unsigned long)metadata->slot);
   key_buffer[n] = '\0';
 
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
@@ -120,10 +127,13 @@ void write_to_key_slot_store(km_key_metadata_t *metadata) {
 
 void km_keys_init_storage() {
   size_t len;
-  if (km_store_read(KEYMGR_KEYS_MAIN_INDEX, &len) != NULL) {
+  void *read_result = km_store_read(NULL, KEYMGR_KEYS_MAIN_INDEX, &len);
+  if (read_result != NULL) {
     ESP_LOGI(TAG, "Key index already initialized.");
+    free(read_result);
     return;
   }
+
   ESP_LOGI(TAG, "Key index not initialized... initializing now...");
 
   km_key_store_t index;
@@ -137,26 +147,30 @@ void km_keys_init_storage() {
     return;
   }
 
+  km_sz_free(sz);
   ESP_LOGI(TAG, "Key index initialized.");
   return;
 }
 
-bool km_keys_add_key(km_key_metadata_t *metadata) {
+bool km_keys_add_key(km_memory_pool_t *pool, km_key_metadata_t *metadata) {
   // Read index from NVS
   size_t index_size = 0;
-  uint8_t *index_buffer = km_store_read(KEYMGR_KEYS_MAIN_INDEX, &index_size);
+  uint8_t *index_buffer =
+      km_store_read(pool, KEYMGR_KEYS_MAIN_INDEX, &index_size);
 
   // Deserialize the index
   km_key_store_t index;
-  km_deserializer_t *dz = km_dz_init_copy(index_buffer, index_size);
-  if (!key_store_deserialize(dz, &index)) {
+  km_deserializer_t *dz = km_dz_init_copy(pool, index_buffer, index_size);
+  if (!key_store_deserialize(pool, dz, &index)) {
     ESP_LOGE(TAG, "Could not deserialize key index");
     return false;
   }
 
   // Increment the key count and add slot to the list
+  index.slots =
+      km_memory_realloc(pool, index.slots, sizeof(km_slot_t) * index.count,
+                        sizeof(km_slot_t) * (index.count + 1));
   index.count++;
-  index.slots = realloc(index.slots, sizeof(km_slot_t) * index.count);
   index.slots[index.count - 1] = metadata->slot;
 
   // Serialize the index and write back to NVS
@@ -166,10 +180,10 @@ bool km_keys_add_key(km_key_metadata_t *metadata) {
     ESP_LOGE(TAG, "Could not persist key index");
     return false;
   }
+  km_sz_free(sz);
 
   write_to_key_slot_store(metadata);
 
   // All done
-  free(index.slots);
   return true;
 }

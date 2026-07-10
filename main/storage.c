@@ -1,6 +1,7 @@
 #include "storage.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "memory.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -12,7 +13,7 @@ void km_store_init() {
   ESP_ERROR_CHECK(err);
 }
 
-void *km_store_read(const char *key, size_t *len) {
+void *km_store_read(km_memory_pool_t *pool, const char *key, size_t *len) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
   if (err != ESP_OK) {
@@ -28,7 +29,7 @@ void *km_store_read(const char *key, size_t *len) {
     return NULL;
   }
 
-  void *raw_data = malloc(required_size);
+  void *raw_data = km_memory_alloc(pool, required_size);
   err = nvs_get_blob(handle, key, raw_data, &required_size);
   if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
     ESP_LOGE(TAG, "read: Could not get blob data");

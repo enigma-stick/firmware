@@ -1,6 +1,7 @@
 #ifndef KEYMGR_KEYS_H
 #define KEYMGR_KEYS_H
 
+#include "memory.h"
 #include <stdint.h>
 
 typedef uint32_t km_slot_t;
@@ -19,8 +20,10 @@ typedef struct _key_store {
 } km_key_store_t;
 
 void km_keys_init_storage();
-bool km_keys_add_key(km_key_metadata_t *metadata);
-bool km_keys_find_label(const char *label, km_key_metadata_t *out);
-bool km_keys_get_meta(km_slot_t slot, km_key_metadata_t *out);
+bool km_keys_add_key(km_memory_pool_t *pool, km_key_metadata_t *metadata);
+bool km_keys_find_label(km_memory_pool_t *pool, const char *label,
+                        km_key_metadata_t *out);
+bool km_keys_get_meta(km_memory_pool_t *pool, km_slot_t slot,
+                      km_key_metadata_t *out);
 
 #endif // KEYMGR_KEYS_H

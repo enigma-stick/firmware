@@ -1,6 +1,7 @@
 #ifndef KEYMGR_SERIAL_H
 #define KEYMGR_SERIAL_H
 
+#include "memory.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -49,13 +50,16 @@ void km_sz_u32(km_serializer_t *sz, uint32_t x);
 void km_sz_str(km_serializer_t *sz, const char *x);
 void km_sz_bool(km_serializer_t *sz, bool x);
 
-km_deserializer_t *km_dz_init_copy(const uint8_t *data, size_t len);
-km_deserializer_t *km_dz_init_move(uint8_t *data, size_t len);
+// km_deserializer_t *km_dz_init_copy(const uint8_t *data, size_t len);
+km_deserializer_t *km_dz_init_copy(km_memory_pool_t *pool, const uint8_t *data,
+                                   size_t len);
+km_deserializer_t *km_dz_init_move(km_memory_pool_t *pool, uint8_t *data,
+                                   size_t len);
 void km_dz_free(km_deserializer_t *dz);
 bool km_dz_u8(km_deserializer_t *dz, uint8_t *out);
 bool km_dz_u16(km_deserializer_t *dz, uint16_t *out);
 bool km_dz_u32(km_deserializer_t *dz, uint32_t *out);
-bool km_dz_str(km_deserializer_t *dz, char **out);
+bool km_dz_str(km_memory_pool_t *pool, km_deserializer_t *dz, char **out);
 bool km_dz_bool(km_deserializer_t *dz, bool *out);
 
 #endif // KEYMGR_SERIAL_H

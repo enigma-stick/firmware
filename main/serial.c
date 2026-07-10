@@ -1,6 +1,10 @@
 #include "serial.h"
+#include "esp_log.h"
+#include "memory.h"
 #include <stdlib.h>
 #include <string.h>
+
+static const char *TAG = "keymgr_serial";
 
 km_serializer_t *km_sz_init(size_t alloc) {
   km_serializer_t *inst = (km_serializer_t *)malloc(sizeof(km_serializer_t));
@@ -51,29 +55,45 @@ void km_sz_str(km_serializer_t *sz, const char *x) {
 
 inline void km_sz_bool(km_serializer_t *sz, bool x) { km_sz_u8(sz, x); }
 
-km_deserializer_t *km_dz_init_copy(const uint8_t *data, size_t len) {
+// km_deserializer_t *km_dz_init_copy(const uint8_t *data, size_t len) {
+//   km_deserializer_t *inst =
+//       (km_deserializer_t *)malloc(sizeof(km_deserializer_t));
+//
+//   inst->data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+//   inst->len = len;
+//   inst->cursor = 0;
+//   inst->owned = true;
+//   inst->failed = false;
+//   memcpy(inst->data, data, len);
+//
+//   return inst;
+// }
+
+km_deserializer_t *km_dz_init_move(km_memory_pool_t *pool, uint8_t *data,
+                                   size_t len) {
   km_deserializer_t *inst =
-      (km_deserializer_t *)malloc(sizeof(km_deserializer_t));
-
-  inst->data = (uint8_t *)malloc(sizeof(uint8_t) * len);
-  inst->len = len;
-  inst->cursor = 0;
-  inst->owned = true;
-  inst->failed = false;
-  memcpy(inst->data, data, len);
-
-  return inst;
-}
-
-km_deserializer_t *km_dz_init_move(uint8_t *data, size_t len) {
-  km_deserializer_t *inst =
-      (km_deserializer_t *)malloc(sizeof(km_deserializer_t));
+      (km_deserializer_t *)km_memory_alloc(pool, sizeof(km_deserializer_t));
 
   inst->data = data;
   inst->len = len;
   inst->cursor = 0;
   inst->owned = false;
   inst->failed = false;
+
+  return inst;
+}
+
+km_deserializer_t *km_dz_init_copy(km_memory_pool_t *pool, const uint8_t *data,
+                                   size_t len) {
+  km_deserializer_t *inst =
+      (km_deserializer_t *)km_memory_alloc(pool, sizeof(km_deserializer_t));
+
+  inst->data = (uint8_t *)km_memory_alloc(pool, sizeof(uint8_t) * len);
+  inst->len = len;
+  inst->cursor = 0;
+  inst->owned = false;
+  inst->failed = false;
+  memcpy(inst->data, data, len);
 
   return inst;
 }
@@ -126,30 +146,34 @@ bool km_dz_u32(km_deserializer_t *dz, uint32_t *out) {
   return true;
 }
 
-bool km_dz_str(km_deserializer_t *dz, char **out) {
+bool km_dz_str(km_memory_pool_t *pool, km_deserializer_t *dz, char **out) {
   if (dz->failed) {
     return false;
   }
 
-  uint32_t str_len;
+  uint32_t str_len = 0;
   if (!km_dz_u32(dz, &str_len)) {
+    ESP_LOGE(TAG, "Error reading string length");
     return false;
   }
 
   if (str_len == 0) {
     if (out != NULL) {
-      *out = malloc(sizeof(char));
+      *out = km_memory_alloc(pool, sizeof(char));
       *out[0] = '\0';
     }
     return true;
   }
 
   if (dz->cursor + str_len > dz->len) {
+    ESP_LOGE(TAG,
+             "String read out of bounds (cursor=%lu, strlen=%lu, blen=%lu)",
+             dz->cursor, str_len, dz->len);
     dz->failed = true;
     return false;
   }
 
-  char *str = (char *)malloc(sizeof(char) * (str_len + 1));
+  char *str = (char *)km_memory_alloc(pool, sizeof(char) * (str_len + 1));
   memcpy(str, dz->data + dz->cursor, str_len);
   str[str_len] = '\0';
   dz->cursor += str_len;
