@@ -1,4 +1,5 @@
 #include "usb_transport.h"
+#include "app.h"
 #include "commands.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
@@ -14,8 +15,7 @@ static const char *TAG = "keymgr_usb";
 
 static void km_usb_frame_handler(const km_frame_header_t *frame_header,
                                  const uint8_t *payload, void *ctx) {
-  (void)ctx;
-  km_commands_handle(frame_header, payload);
+  km_commands_handle(ctx, frame_header, payload);
 }
 
 void km_usb_write_response(enum km_command_response_type type,
@@ -42,9 +42,7 @@ void km_usb_write_success(void) {
   km_usb_write_response(km_command_response_ok, NULL, 0);
 }
 
-static void km_usb_task_handler(void *arg) {
-  (void)arg;
-
+static void km_usb_task_handler(void *ctx) {
   usb_serial_jtag_driver_config_t usb_config = {
       .rx_buffer_size = USB_BUFFER_SIZE,
       .tx_buffer_size = USB_BUFFER_SIZE,
@@ -62,7 +60,7 @@ static void km_usb_task_handler(void *arg) {
                                          20 / portTICK_PERIOD_MS);
     for (int i = 0; i < len; i++) {
       km_frame_parse_result_t result = km_frame_parser_feed(
-          &parser, rx_buffer[i], km_usb_frame_handler, NULL);
+          &parser, rx_buffer[i], km_usb_frame_handler, ctx);
       if (result == km_frame_parse_too_long) {
         km_usb_write_error("Command too long");
       }
@@ -70,6 +68,6 @@ static void km_usb_task_handler(void *arg) {
   }
 }
 
-void km_usb_start(void) {
-  xTaskCreate(km_usb_task_handler, "km_usb_task_handler", 4096, NULL, 10, NULL);
+void km_usb_start(km_app_context_t *ctx) {
+  xTaskCreate(km_usb_task_handler, "km_usb_task_handler", 4096, ctx, 10, NULL);
 }

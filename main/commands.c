@@ -1,7 +1,9 @@
 #include "commands.h"
+#include "app.h"
 #include "crypto.h"
 #include "esp_log.h"
 #include "keys.h"
+#include "led_status.h"
 #include "memory.h"
 #include "protocol.h"
 #include "serial.h"
@@ -451,13 +453,15 @@ cleanup:
   km_memory_free(pool);
 }
 
-void km_commands_handle(const km_frame_header_t *frame_header,
+void km_commands_handle(km_app_context_t *ctx,
+                        const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
   if (frame_header->version != KM_PROTOCOL_VERSION) {
     km_usb_write_error("Invalid command version");
     return;
   }
 
+  km_led_busy_on(ctx);
   switch (frame_header->command) {
   case km_command_ping:
     km_usb_write_success();
@@ -480,4 +484,5 @@ void km_commands_handle(const km_frame_header_t *frame_header,
   default:
     km_usb_write_error("Invalid command");
   }
+  km_led_busy_off(ctx);
 }

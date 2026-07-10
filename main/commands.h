@@ -1,6 +1,7 @@
 #ifndef KEYMGR_COMMANDS_H
 #define KEYMGR_COMMANDS_H
 
+#include "app.h"
 #include "memory.h"
 #include "protocol.h"
 #include "serial.h"
@@ -97,7 +98,8 @@ size_t km_command_response_decrypt_serialize(
     km_memory_pool_t *pool, const km_command_response_decrypt_t *command,
     uint8_t **out);
 
-void km_commands_handle(const km_frame_header_t *frame_header,
+void km_commands_handle(km_app_context_t *ctx,
+                        const km_frame_header_t *frame_header,
                         const uint8_t *payload);
 
 #endif // KEYMGR_COMMANDS_H
