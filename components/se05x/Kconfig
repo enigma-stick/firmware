@@ -1,0 +1,33 @@
+menu "NXP SE051 compatibility layer"
+
+    config SE05X_I2C_PORT
+        int "I2C controller"
+        range 0 0
+        default 0
+
+    config SE05X_I2C_SDA
+        int "SDA GPIO"
+        range 0 30
+        default 6
+
+    config SE05X_I2C_SCL
+        int "SCL GPIO"
+        range 0 30
+        default 5
+
+    config SE05X_I2C_ADDRESS
+        hex "7-bit I2C address"
+        range 0x08 0x77
+        default 0x48
+
+    config SE05X_I2C_FREQUENCY
+        int "I2C clock frequency (Hz)"
+        range 10000 1000000
+        default 400000
+
+    config SE05X_I2C_TIMEOUT_MS
+        int "I2C operation timeout (ms)"
+        range 10 5000
+        default 1000
+
+endmenu

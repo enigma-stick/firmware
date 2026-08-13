@@ -1,0 +1,3 @@
+[submodule "components/se05x/nxp/plug-and-trust"]
+	path = components/se05x/nxp/plug-and-trust
+	url = https://github.com/NXP/plug-and-trust.git
