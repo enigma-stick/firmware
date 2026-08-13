@@ -1,2 +1,8 @@
 build/**
 .session.vim
+managed_components/
+sdkconfig.old
+
+# Vendor checkout used by the experimental Trust M component. The component
+# build glue and the local compatibility patches are tracked separately.
+components/optiga_trust_m/optiga-trust-m/
