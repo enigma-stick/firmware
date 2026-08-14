@@ -9,6 +9,7 @@
 #include "se05x_impl.h"
 #include "se_worker.h"
 #include "storage.h"
+#include "token.h"
 #include "usb_transport.h"
 
 static const char *TAG = "keymgr";
@@ -23,6 +24,7 @@ void app_main(void) {
   // Set up storage
   km_store_init();
   km_keys_init_storage();
+  ESP_ERROR_CHECK(km_token_init());
 
   // Set up crypto
   km_crypto_init();
