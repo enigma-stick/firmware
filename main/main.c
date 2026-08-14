@@ -1,10 +1,13 @@
 #include "app.h"
 #include "crypto.h"
 #include "esp_log.h"
+#include "esp_log_buffer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "keys.h"
 #include "led_status.h"
+#include "se05x_impl.h"
+#include "se_worker.h"
 #include "storage.h"
 #include "usb_transport.h"
 
@@ -23,6 +26,9 @@ void app_main(void) {
 
   // Set up crypto
   km_crypto_init();
+
+  // Start SE05X worker
+  ESP_ERROR_CHECK(km_se_worker_start());
 
   // Set up lights
   km_led_event_listener_start(&ctx);
