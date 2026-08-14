@@ -7,17 +7,20 @@ if(NOT EXISTS "${SE05X_NXP_DIR}/sss/inc/fsl_sss_ftr.h.in")
 endif()
 
 # Generate NXP's feature header outside the vendor submodule. This initial
-# compatibility build targets an SE051C2 (IoT applet 7.2), a plain/default
-# session, and no host-side crypto. Authenticated sessions are intentionally a
-# later integration step.
+# compatibility build targets an SE051C2 (IoT applet 7.2). The small user-host
+# crypto port below provides the AES/CMAC operations authenticated sessions
+# require through ESP-IDF's PSA implementation.
 set(SSS_HAVE_APPLET_SE05X_C 1)
 set(SSS_HAVE_SE05X_VER_07_02 1)
-set(SSS_HAVE_HOSTCRYPTO_NONE 1)
+set(SSS_HAVE_HOSTCRYPTO_USER 1)
+set(SSS_HAVE_HOSTCRYPTO_NONE 0)
 set(SSS_HAVE_MBEDTLS_ALT_NONE 1)
-set(SSS_HAVE_SCP_NONE 1)
+set(SSS_HAVE_SCP_NONE 0)
+set(SSS_HAVE_SCP_SCP03_SSS 1)
 set(SSS_HAVE_FIPS_NONE 1)
 set(SSS_HAVE_SBL_NONE 1)
-set(SSS_HAVE_SE05X_AUTH_NONE 1)
+set(SSS_HAVE_SE05X_AUTH_NONE 0)
+set(SSS_HAVE_SE05X_AUTH_AESKEY 1)
 set(SSS_HAVE_SE_RESET_LOGIC_1 1)
 
 set(SSSFTR_SE05X_AES 1)
@@ -25,8 +28,12 @@ set(SSSFTR_SE05X_ECC 1)
 set(SSSFTR_SE05X_RSA 1)
 set(SSSFTR_SE05X_KEY_SET 1)
 set(SSSFTR_SE05X_KEY_GET 1)
-set(SSSFTR_SE05X_AuthECKey 1)
+set(SSSFTR_SE05X_AuthECKey 0)
+set(SSSFTR_SE05X_AuthSession 1)
 set(SSSFTR_SE05X_CREATE_DELETE_CRYPTOOBJ 1)
+set(SSSFTR_SW_AES 1)
+set(SSSFTR_SW_KEY_SET 1)
+set(SSSFTR_SW_KEY_GET 1)
 set(SSS_HAVE_ECC 1)
 set(SSS_HAVE_RSA 1)
 set(SSS_HAVE_EC_ED 1)
@@ -46,19 +53,23 @@ configure_file(
 set(SE05X_SOURCES
     "port/i2c_espidf.c"
     "port/sm_timer_espidf.c"
+    "port/sss_user_psa.c"
     "se05x_esp.c"
+    "se05x_esp_admin.c"
     "${SE05X_NXP_DIR}/sss/src/fsl_sss_apis.c"
     "${SE05X_NXP_DIR}/sss/src/fsl_sss_util_asn1_der.c"
     "${SE05X_NXP_DIR}/sss/src/fsl_sss_util_rsa_sign_utils.c"
     "${SE05X_NXP_DIR}/sss/src/se05x/fsl_sss_se05x_apis.c"
     "${SE05X_NXP_DIR}/sss/src/se05x/fsl_sss_se05x_mw.c"
     "${SE05X_NXP_DIR}/sss/src/se05x/fsl_sss_se05x_policy.c"
+    "${SE05X_NXP_DIR}/sss/src/se05x/fsl_sss_se05x_scp03.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra/global_platf.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra/sm_apdu.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra/sm_connect.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra/sm_errors.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra/sm_printf.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/log/nxLog.c"
+    "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/nxScp/nxScp03_Com.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/smCom/smCom.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/smCom/smComT1oI2C.c"
     "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/smCom/T1oI2C/phNxpEsePal_i2c.c"
@@ -82,6 +93,7 @@ idf_component_register(
         "${SE05X_NXP_DIR}/hostlib/hostLib/inc"
         "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/infra"
         "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/log"
+        "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/nxScp"
         "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/smCom"
         "${SE05X_NXP_DIR}/hostlib/hostLib/libCommon/smCom/T1oI2C"
         "${SE05X_NXP_DIR}/hostlib/hostLib/platform/inc"
@@ -91,6 +103,7 @@ idf_component_register(
         esp_timer
         freertos
         log
+        mbedtls
 )
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
@@ -107,3 +120,7 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     T1oI2C_UM11225
     T1OI2C_RETRY_ON_I2C_FAILED
 )
+
+# NXP's statement-style compile-time assertion triggers GCC 15's
+# -Wunused-value diagnostic in the generic SSS dispatcher.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=unused-value)

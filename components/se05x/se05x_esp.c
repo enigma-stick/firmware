@@ -1,10 +1,146 @@
 #include "se05x_esp.h"
 
 #include "se05x_APDU.h"
+#include "fsl_sss_user_apis.h"
+#include "mbedtls/platform_util.h"
 #include "sdkconfig.h"
 #include "sm_types.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+#define SE05X_ESP_AES_AUTH_KEY_SIZE 16u
+
+typedef struct {
+  sss_session_t host_session;
+  sss_key_store_t host_key_store;
+  NXSCP03_StaticCtx_t static_context;
+  NXSCP03_DynCtx_t dynamic_context;
+  bool host_session_open;
+  bool host_key_store_initialized;
+} se05x_esp_authentication_state_t;
+
+static void se05x_esp_free_host_object(sss_object_t *object) {
+  sss_key_object_free(object);
+}
+
+static void se05x_esp_authentication_state_free(
+    se05x_esp_authentication_state_t *state) {
+  if (state == NULL) {
+    return;
+  }
+
+  se05x_esp_free_host_object(&state->dynamic_context.Rmac);
+  se05x_esp_free_host_object(&state->dynamic_context.Mac);
+  se05x_esp_free_host_object(&state->dynamic_context.Enc);
+  se05x_esp_free_host_object(&state->static_context.Dek);
+  se05x_esp_free_host_object(&state->static_context.Mac);
+  se05x_esp_free_host_object(&state->static_context.Enc);
+
+  if (state->host_key_store_initialized) {
+    sss_key_store_context_free(&state->host_key_store);
+  }
+  if (state->host_session_open) {
+    sss_session_close(&state->host_session);
+  }
+  mbedtls_platform_zeroize(state, sizeof(*state));
+  free(state);
+}
+
+static sss_status_t se05x_esp_allocate_host_key(
+    se05x_esp_authentication_state_t *state, sss_object_t *object,
+    uint32_t object_id, const uint8_t *key) {
+  sss_status_t status =
+      sss_key_object_init(object, &state->host_key_store);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+
+  status = sss_key_object_allocate_handle(
+      object, object_id, kSSS_KeyPart_Default, kSSS_CipherType_AES,
+      SE05X_ESP_AES_AUTH_KEY_SIZE, kKeyObject_Mode_Transient);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  if (key == NULL) {
+    return kStatus_SSS_Success;
+  }
+
+  return sss_key_store_set_key(
+      &state->host_key_store, object, key, SE05X_ESP_AES_AUTH_KEY_SIZE,
+      SE05X_ESP_AES_AUTH_KEY_SIZE * 8u, NULL, 0);
+}
+
+static sss_status_t se05x_esp_prepare_aes_authentication(
+    se05x_esp_session_t *session, const uint8_t *authentication_key) {
+  static const uint32_t host_object_ids[] = {
+      0x4B4D0101u, 0x4B4D0102u, 0x4B4D0103u,
+      0x4B4D0104u, 0x4B4D0105u, 0x4B4D0106u,
+  };
+
+  se05x_esp_authentication_state_t *state = calloc(1, sizeof(*state));
+  if (state == NULL) {
+    return kStatus_SSS_Fail;
+  }
+  session->authentication_state = state;
+
+  sss_status_t status = sss_session_open(
+      &state->host_session, kType_SSS_Software, 0,
+      kSSS_ConnectionType_Plain, NULL);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  state->host_session_open = true;
+
+  status = sss_key_store_context_init(&state->host_key_store,
+                                      &state->host_session);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  state->host_key_store_initialized = true;
+
+  status =
+      sss_key_store_allocate(&state->host_key_store, 0x4B4D0100u);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+
+  state->static_context.key_len = SE05X_ESP_AES_AUTH_KEY_SIZE;
+  status = se05x_esp_allocate_host_key(state, &state->static_context.Enc,
+                                       host_object_ids[0], authentication_key);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  status = se05x_esp_allocate_host_key(state, &state->static_context.Mac,
+                                       host_object_ids[1], authentication_key);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  status = se05x_esp_allocate_host_key(state, &state->static_context.Dek,
+                                       host_object_ids[2], authentication_key);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  status = se05x_esp_allocate_host_key(state, &state->dynamic_context.Enc,
+                                       host_object_ids[3], NULL);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  status = se05x_esp_allocate_host_key(state, &state->dynamic_context.Mac,
+                                       host_object_ids[4], NULL);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+  status = se05x_esp_allocate_host_key(state, &state->dynamic_context.Rmac,
+                                       host_object_ids[5], NULL);
+  if (status != kStatus_SSS_Success) {
+    return status;
+  }
+
+  session->connection.auth.ctx.scp03.pStatic_ctx = &state->static_context;
+  session->connection.auth.ctx.scp03.pDyn_ctx = &state->dynamic_context;
+  return kStatus_SSS_Success;
+}
 
 sss_status_t se05x_esp_session_open(se05x_esp_session_t *session) {
   if (session == NULL) {
@@ -26,6 +162,42 @@ sss_status_t se05x_esp_session_open(se05x_esp_session_t *session) {
   return status;
 }
 
+sss_status_t se05x_esp_session_open_aes_key(
+    se05x_esp_session_t *session, uint32_t authentication_object_id,
+    const uint8_t *authentication_key, size_t authentication_key_length) {
+  if (session == NULL || authentication_object_id == 0 ||
+      authentication_key == NULL ||
+      authentication_key_length != SE05X_ESP_AES_AUTH_KEY_SIZE) {
+    return kStatus_SSS_InvalidArgument;
+  }
+
+  memset(session, 0, sizeof(*session));
+  session->connection.sizeOfStucture = sizeof(session->connection);
+  session->connection.auth.authType = kSSS_AuthType_AESKey;
+  session->connection.connType = kType_SE_Conn_Type_T1oI2C;
+  session->connection.i2cAddress = CONFIG_SE05X_I2C_ADDRESS;
+
+  sss_status_t status =
+      se05x_esp_prepare_aes_authentication(session, authentication_key);
+  if (status != kStatus_SSS_Success) {
+    se05x_esp_authentication_state_free(session->authentication_state);
+    session->authentication_state = NULL;
+    return status;
+  }
+
+  status = sss_se05x_session_open(
+      &session->sss, kType_SSS_SE_SE05x, authentication_object_id,
+      kSSS_ConnectionType_Encrypted, &session->connection);
+  if (status != kStatus_SSS_Success) {
+    se05x_esp_authentication_state_free(session->authentication_state);
+    session->authentication_state = NULL;
+    return status;
+  }
+
+  session->is_open = true;
+  return kStatus_SSS_Success;
+}
+
 void se05x_esp_session_close(se05x_esp_session_t *session) {
   if (session == NULL || !session->is_open) {
     return;
@@ -33,6 +205,8 @@ void se05x_esp_session_close(se05x_esp_session_t *session) {
 
   sss_se05x_session_close(&session->sss);
   session->is_open = false;
+  se05x_esp_authentication_state_free(session->authentication_state);
+  session->authentication_state = NULL;
 }
 
 sss_status_t se05x_esp_get_info(se05x_esp_session_t *session,

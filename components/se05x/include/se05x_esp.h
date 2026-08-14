@@ -14,6 +14,8 @@
 typedef struct {
   sss_se05x_session_t sss;
   SE05x_Connect_Ctx_t connection;
+  /** Private host-crypto state used by an authenticated session. */
+  void *authentication_state;
   bool is_open;
 } se05x_esp_session_t;
 
@@ -27,6 +29,17 @@ typedef struct {
 
 /** Open a plain/default SSS session for initial board bring-up. */
 sss_status_t se05x_esp_session_open(se05x_esp_session_t *session);
+
+/**
+ * Open an encrypted applet session authenticated by a 128-bit AES object.
+ *
+ * The authentication key is copied into temporary host-crypto objects and is
+ * released when the session closes. The caller should clear its own key copy.
+ */
+sss_status_t se05x_esp_session_open_aes_key(se05x_esp_session_t *session,
+                                            uint32_t authentication_object_id,
+                                            const uint8_t *authentication_key,
+                                            size_t authentication_key_length);
 
 /** Close a session opened by se05x_esp_session_open. */
 void se05x_esp_session_close(se05x_esp_session_t *session);
