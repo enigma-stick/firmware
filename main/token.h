@@ -11,6 +11,11 @@
 #define KEYMGR_SE_AUTH_OBJECT_ID 0x4B4D0001u
 #define KEYMGR_SE_HMAC_MASTER_ID 0x4B4D0002u
 #define KEYMGR_SE_APP_KEY_BASE 0x4B4D1000u
+#define KEYMGR_ESP_HMAC_KEY_ID ((psa_key_id_t)0x004B4D01u)
+
+#define TEST_AUTH_OBJECT_ID 0x4B4DFF30u
+#define TEST_HMAC_MASTER_ID 0x4B4DFF31u
+#define TEST_AES_CHILD_ID 0x4B4DFF32u
 
 typedef enum {
   KM_TOKEN_UNINITIALIZED,
@@ -29,10 +34,13 @@ typedef struct {
   uint32_t se_hmac_id;
 } km_token_metadata_t;
 
-/** Load the token record, creating an uninitialized record when it is absent. */
+/** Load the token record, creating an uninitialized record when it is absent.
+ */
 esp_err_t km_token_init(void);
 
 /** Return the loaded metadata, or NULL if km_token_init has not succeeded. */
 const km_token_metadata_t *km_token_get_metadata(void);
+
+esp_err_t km_token_provision(char *pin, size_t pin_length);
 
 #endif // KEYMGR_TOKEN_H

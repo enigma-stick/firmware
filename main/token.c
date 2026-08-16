@@ -1,7 +1,9 @@
 #include "token.h"
 
+#include "crypto.h"
 #include "esp_log.h"
 #include "nvs.h"
+#include "se_worker.h"
 #include "serial.h"
 #include "storage.h"
 #include <stdbool.h>
@@ -10,6 +12,7 @@
 
 #define KEYMGR_TOKEN_STORE_KEY "keymgr:se:token"
 #define KEYMGR_TOKEN_DEFAULT_PBKDF2_ROUNDS 256u
+#define KEYMGR_TOKEN_LABEL "keymgr/se051-auth/v1"
 
 static const char *TAG = "keymgr_token";
 static km_token_metadata_t token_metadata;
@@ -99,13 +102,25 @@ static esp_err_t token_metadata_write(const km_token_metadata_t *metadata) {
   return written ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t token_metadata_commit(const km_token_metadata_t *candidate) {
+  esp_err_t err = token_metadata_write(candidate);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  token_metadata = *candidate;
+  token_metadata_loaded = true;
+  return ESP_OK;
+}
+
 static void token_metadata_set_defaults(km_token_metadata_t *metadata) {
   memset(metadata, 0, sizeof(*metadata));
   metadata->version = KEYMGR_TOKEN_METADATA_VERSION;
   metadata->state = KM_TOKEN_UNINITIALIZED;
   metadata->pbkdf2_rounds = KEYMGR_TOKEN_DEFAULT_PBKDF2_ROUNDS;
-  metadata->se_auth_object_id = KEYMGR_SE_AUTH_OBJECT_ID;
-  metadata->se_hmac_id = KEYMGR_SE_HMAC_MASTER_ID;
+  metadata->se_auth_object_id = TEST_AUTH_OBJECT_ID; // TODO: change to prod
+  metadata->se_hmac_id = TEST_HMAC_MASTER_ID;        // TODO: change to prod
+  metadata->esp_key_id = KEYMGR_ESP_HMAC_KEY_ID;
 }
 
 esp_err_t km_token_init(void) {
@@ -152,4 +167,125 @@ esp_err_t km_token_init(void) {
 
 const km_token_metadata_t *km_token_get_metadata(void) {
   return token_metadata_loaded ? &token_metadata : NULL;
+}
+
+static esp_err_t km_token_provision_generate_keys(char *pin,
+                                                  size_t pin_length) {
+  uint8_t derived_material[32] = {0};
+  uint8_t K[16] = {0};
+  esp_err_t result = ESP_FAIL;
+
+  if (!km_crypto_generate_hmac(token_metadata.esp_key_id)) {
+    ESP_LOGE(TAG, "Could not generate auth HMAC");
+    goto cleanup;
+  }
+
+  if (!km_crypto_pbkdf2(token_metadata.pbkdf2_rounds, token_metadata.salt,
+                        sizeof(token_metadata.salt), (uint8_t *)pin, pin_length,
+                        derived_material, sizeof(derived_material))) {
+    ESP_LOGE(TAG, "Could not derive auth key material from PIN");
+    goto cleanup;
+  }
+
+  if (!km_crypto_kdf_hmac(token_metadata.esp_key_id, KEYMGR_TOKEN_LABEL,
+                          token_metadata.uid, sizeof(token_metadata.uid),
+                          derived_material, sizeof(derived_material), K,
+                          sizeof(K))) {
+    ESP_LOGE(TAG, "Could not HMAC the PIN material");
+    goto cleanup;
+  }
+  km_crypto_zero(derived_material, sizeof(derived_material));
+
+  if (km_se_worker_provision_auth_object(token_metadata.se_auth_object_id, K) !=
+      ESP_OK) {
+    ESP_LOGE(TAG, "Could not provision auth object on SE05X");
+    goto cleanup;
+  }
+  km_crypto_zero(K, sizeof(K));
+
+  if (km_se_worker_provision_hmac_master(token_metadata.se_hmac_id) != ESP_OK) {
+    ESP_LOGE(TAG, "Could not provision HMAC master on SE05X");
+    goto cleanup;
+  }
+
+  result = ESP_OK;
+
+cleanup:
+  km_crypto_zero(derived_material, sizeof(derived_material));
+  km_crypto_zero(K, sizeof(K));
+  return result;
+}
+
+esp_err_t km_token_provision(char *pin, size_t pin_length) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot provision before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (pin == NULL || pin_length == 0) {
+    ESP_LOGE(TAG, "Cannot provision with an empty PIN");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (token_metadata.state == KM_TOKEN_READY) {
+    ESP_LOGE(TAG, "Token is already provisioned");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  km_token_metadata_t candidate = token_metadata;
+
+  // Get UID
+  uint8_t uid[SE05X_ESP_UID_SIZE];
+  size_t uid_len = sizeof(uid);
+  esp_err_t err = km_se_worker_get_uid(uid, &uid_len);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not get secure element UID: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  if (candidate.state == KM_TOKEN_PROVISIONING) {
+    if (memcmp(uid, candidate.uid, sizeof(candidate.uid)) != 0) {
+      ESP_LOGE(TAG, "SE051 UID changed while provisioning");
+      return ESP_ERR_INVALID_STATE;
+    }
+  } else if (candidate.state == KM_TOKEN_UNINITIALIZED) {
+    memcpy(candidate.uid, uid, uid_len);
+
+    uint8_t salt[KEYMGR_TOKEN_SALT_SIZE];
+    uint8_t salt_len = sizeof(salt);
+    if (!km_crypto_rand(salt, salt_len)) {
+      ESP_LOGE(TAG, "Could not generate token salt");
+      return ESP_FAIL;
+    }
+
+    memcpy(candidate.salt, salt, salt_len);
+
+    candidate.state = KM_TOKEN_PROVISIONING;
+    err = token_metadata_commit(&candidate);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Could not commit PROVISIONING metadata: %s",
+               esp_err_to_name(err));
+      return err;
+    }
+    ESP_LOGI(TAG, "Token metadata committed in PROVISIONING state");
+  }
+
+  err = km_token_provision_generate_keys(pin, pin_length);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not generate provisional keys: %s",
+             esp_err_to_name(err));
+    return err;
+  }
+
+  candidate.state = KM_TOKEN_READY;
+  err = token_metadata_commit(&candidate);
+
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not commit READY metadata: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  ESP_LOGI(TAG, "Token provisioning completed; state is READY");
+
+  return ESP_OK;
 }

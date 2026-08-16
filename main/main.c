@@ -4,7 +4,6 @@
 #include "esp_log_buffer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "keys.h"
 #include "led_status.h"
 #include "se05x_impl.h"
 #include "se_worker.h"
@@ -23,7 +22,6 @@ void app_main(void) {
 
   // Set up storage
   km_store_init();
-  km_keys_init_storage();
   ESP_ERROR_CHECK(km_token_init());
 
   // Set up crypto

@@ -9,6 +9,7 @@ supplies the platform code it needs on ESP-IDF:
 - a small default-session diagnostic API
 - read-only administrative helpers for memory and object inventory
 - AES-key authenticated applet sessions backed by ESP-IDF's PSA crypto API
+- create-only provisioning of AES applet authentication objects
 
 Initialize the vendor source after cloning the repository:
 
@@ -19,10 +20,12 @@ git submodule update --init --recursive
 `se05x_esp_session_open()` deliberately opens a plain, unauthenticated session
 for board bring-up and provisioning. `se05x_esp_session_open_aes_key()` opens an
 encrypted applet session using an existing 128-bit AES authentication object.
-Production object policies, provisioning, and key lifecycle remain outside the
-component's compatibility API.
+Production object policy selection, provisioning flow, and key lifecycle remain
+outside the component's compatibility API.
 
 Normal key creation and cryptographic operations should use NXP's `sss_*` API
-directly. `se05x_esp_admin.h` only wraps SE051-specific management commands for
-which the generic SSS API has no equivalent. These helpers do not create,
-update, or delete secure objects.
+directly. `se05x_esp_create_aes_auth_object()` narrowly wraps the direct APDU
+needed to create an authentication object, because generic SSS symmetric-key
+writes only create normal AES objects. `se05x_esp_admin.h` wraps read-only
+SE051-specific management commands for which the generic SSS API has no
+equivalent.

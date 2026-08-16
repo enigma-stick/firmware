@@ -1,6 +1,6 @@
 #include "crypto.h"
 #include "esp_log.h"
-#include "keys.h"
+#include "mbedtls/platform_util.h"
 #include "mbedtls/psa_util.h"
 #include "memory.h"
 #include "psa/crypto.h"
@@ -8,216 +8,190 @@
 #include "psa/crypto_struct.h"
 #include "psa/crypto_types.h"
 #include "psa/crypto_values.h"
+#include <string.h>
 
 static const char *TAG = "keymgr_crypto";
 
 void km_crypto_init() {
   psa_status_t err = psa_crypto_init();
   if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not initialize crypto stack");
+    ESP_LOGE(TAG, "Could not initialize crypto stack: PSA status=%d",
+             (int)err);
     // TODO: panic
   }
 }
 
-bool km_crypto_generate_ecc(size_t bits, psa_key_id_t *out) {
-  if (out == NULL) {
-    ESP_LOGE(TAG, "Attempted to pass NULL as km_key_metadata_t");
+bool km_crypto_rand(uint8_t *buffer, size_t bytes) {
+  if (buffer == NULL || bytes <= 0) {
     return false;
   }
 
-  // Set key attributes
-  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
-  psa_set_key_bits(&attr, bits);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_HASH);
-  psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
-
-  // TODO: REMOVE AFTER TESTING
-  psa_set_key_lifetime(&attr, PSA_KEY_LIFETIME_VOLATILE);
-
-  // Generate the key
-  psa_key_id_t key;
-  psa_status_t err = psa_generate_key(&attr, &key);
+  psa_status_t err = psa_generate_random(buffer, bytes);
   if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not generate key");
     return false;
   }
-  *out = key;
 
-  // Success!
-  psa_reset_key_attributes(&attr);
   return true;
 }
 
-bool km_crypto_generate_aes(size_t bits, psa_key_id_t *out) {
-  if (out == NULL) {
-    ESP_LOGE(TAG, "Attempted to pass NULL as km_key_metadata_t");
-    return false;
-  }
-
-  // Set key attributes
+static bool key_exists(psa_key_id_t key_id) {
   psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attr, bits);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
-  psa_set_key_algorithm(&attr, PSA_ALG_GCM);
+  psa_status_t status = psa_get_key_attributes(key_id, &attr);
+  psa_reset_key_attributes(&attr);
 
-  // TODO: REMOVE AFTER TESTING
-  psa_set_key_lifetime(&attr, PSA_KEY_LIFETIME_VOLATILE);
-
-  psa_key_id_t key;
-  psa_status_t err = psa_generate_key(&attr, &key);
-  if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not generate key");
-    return false;
+  if (status != PSA_SUCCESS && status != PSA_ERROR_INVALID_HANDLE &&
+      status != PSA_ERROR_DOES_NOT_EXIST) {
+    ESP_LOGW(TAG,
+             "Could not check whether PSA key 0x%08x exists: status=%d",
+             (unsigned)key_id, (int)status);
   }
-  *out = key;
+
+  return status == PSA_SUCCESS;
+}
+
+bool km_crypto_generate_hmac(psa_key_id_t key_id) {
+  if (key_exists(key_id)) {
+    ESP_LOGI(TAG, "Key already exists; will re-use");
+    return true;
+  }
+
+  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_id(&attr, key_id);
+  psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+  psa_set_key_bits(&attr, 256);
+  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
+  psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+  psa_set_key_lifetime(&attr, PSA_KEY_LIFETIME_PERSISTENT);
+
+  psa_key_id_t generated_id = 0;
+  psa_status_t status = psa_generate_key(&attr, &generated_id);
 
   psa_reset_key_attributes(&attr);
-  return true;
-}
 
-bool km_crypto_handle_generate(km_key_generate_params_t params,
-                               psa_key_id_t *out) {
-  psa_key_id_t key;
-
-  switch (params.type) {
-  case km_key_type_ecc:
-    if (!km_crypto_generate_ecc(params.size, &key)) {
-      ESP_LOGE(TAG, "Error generating ECC key");
-      return false;
-    }
-    break;
-  case km_key_type_aes:
-    if (!km_crypto_generate_aes(params.size, &key)) {
-      ESP_LOGE(TAG, "Error generating AES key");
-      return false;
-    }
-    break;
-  default:
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG,
+             "Could not generate persistent HMAC key 0x%08x: PSA status=%d",
+             (unsigned)key_id, (int)status);
     return false;
   }
 
-  *out = key;
-  return true;
-}
-
-bool km_crypto_export_public_key(km_memory_pool_t *pool,
-                                 km_key_metadata_t metadata, uint8_t **out,
-                                 size_t *len) {
-  size_t to_alloc = 0;
-  switch (metadata.type) {
-  case km_key_type_ecc:
-    to_alloc = PSA_EXPORT_PUBLIC_KEY_OUTPUT_SIZE(
-        PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1), metadata.size);
-    break;
-  default:
-    ESP_LOGE(TAG, "Key type not supported");
+  if (generated_id != key_id) {
+    ESP_LOGE(TAG,
+             "PSA generated HMAC key 0x%08x instead of requested 0x%08x",
+             (unsigned)generated_id, (unsigned)key_id);
     return false;
   }
-
-  uint8_t *buffer = km_memory_alloc(pool, sizeof(uint8_t) * to_alloc);
-  if (!buffer) {
-    ESP_LOGE(TAG, "Unable to allocate enough memory to export public key");
-    return false;
-  }
-
-  size_t actual_size;
-  psa_status_t err =
-      psa_export_public_key(metadata.slot, buffer, to_alloc, &actual_size);
-  if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Error exporting public key");
-    return false;
-  }
-
-  *out = buffer;
-  *len = actual_size;
 
   return true;
 }
 
-bool km_crypto_sign(km_memory_pool_t *pool, km_key_metadata_t metadata,
-                    uint8_t *digest, uint8_t **out) {
+bool km_crypto_pbkdf2(uint32_t rounds, const uint8_t *salt, size_t salt_len,
+                      const uint8_t *pin, size_t pin_len, uint8_t *output,
+                      size_t output_len) {
+  psa_key_derivation_operation_t operation = PSA_KEY_DERIVATION_OPERATION_INIT;
+  psa_status_t status = psa_key_derivation_setup(
+      &operation, PSA_ALG_PBKDF2_HMAC(PSA_ALG_SHA_256));
 
-  psa_algorithm_t alg;
-  switch (metadata.type) {
-  case km_key_type_ecc:
-    alg = PSA_ALG_ECDSA(PSA_ALG_SHA_256);
-    break;
-  default:
-    ESP_LOGE(TAG, "Unsupported key type");
-    return false;
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not set up KDF");
+    goto cleanup;
   }
 
-  // TODO: this needs to be more generalized, but fine for a first pass.
-  uint8_t *signature = km_memory_alloc(pool, sizeof(uint8_t) * 64);
-  size_t signature_length = 0;
-  psa_status_t err = psa_sign_hash(metadata.slot, alg, digest, 32, signature,
-                                   64, &signature_length);
-  if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not sign hash");
-    return false;
+  status = psa_key_derivation_input_integer(
+      &operation, PSA_KEY_DERIVATION_INPUT_COST, rounds);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not set KDF cost");
+    goto cleanup;
   }
 
-  *out = signature;
+  status = psa_key_derivation_input_bytes(
+      &operation, PSA_KEY_DERIVATION_INPUT_SALT, salt, salt_len);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not set KDF salt");
+    goto cleanup;
+  }
+
+  status = psa_key_derivation_input_bytes(
+      &operation, PSA_KEY_DERIVATION_INPUT_PASSWORD, pin, pin_len);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not set KDF password");
+    goto cleanup;
+  }
+
+  status = psa_key_derivation_output_bytes(&operation, output, output_len);
+
+cleanup:
+  psa_key_derivation_abort(&operation);
+
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not compute KDF");
+    return false;
+  }
   return true;
 }
 
-size_t km_crypto_encrypt(km_memory_pool_t *pool,
-                         km_key_encrypt_params_t *params, uint8_t **out) {
-  psa_algorithm_t alg;
-  switch (params->key->type) {
-  case km_key_type_aes:
-    alg = PSA_ALG_GCM;
-    break;
-  default:
-    ESP_LOGE(TAG, "Unsupported key type");
-    return false;
+bool km_crypto_kdf_hmac(psa_key_id_t key_id, const char *label,
+                        const uint8_t *uid, size_t uid_len,
+                        const uint8_t *material, size_t material_len,
+                        uint8_t *output, size_t output_len) {
+  uint8_t D[PSA_MAC_MAX_SIZE] = {0};
+  psa_mac_operation_t operation = PSA_MAC_OPERATION_INIT;
+
+  psa_status_t status =
+      psa_mac_sign_setup(&operation, key_id, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not set up MAC operation");
+    goto cleanup;
   }
 
-  size_t ciphertext_size =
-      PSA_AEAD_ENCRYPT_OUTPUT_MAX_SIZE(params->plaintext_length);
-  uint8_t *ciphertext = km_memory_alloc(pool, ciphertext_size);
-  size_t ciphertext_length = 0;
-
-  psa_status_t err =
-      psa_aead_encrypt(params->key->slot, alg, params->nonce, 12, NULL, 0,
-                       params->plaintext, params->plaintext_length, ciphertext,
-                       ciphertext_size, &ciphertext_length);
-  if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not encrypt plaintext");
-    return false;
+  status = psa_mac_update(&operation, (uint8_t *)label, strlen(label));
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not add label to MAC payload");
+    goto cleanup;
   }
 
-  *out = ciphertext;
-  return ciphertext_length;
+  status = psa_mac_update(&operation, uid, uid_len);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not add UID to MAC payload");
+    goto cleanup;
+  }
+
+  status = psa_mac_update(&operation, material, material_len);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not add KDF material to MAC payload");
+    goto cleanup;
+  }
+
+  size_t mac_length = 0;
+  status = psa_mac_sign_finish(&operation, D, sizeof(D), &mac_length);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not compute MAC");
+    goto cleanup;
+  }
+
+  if (mac_length != 32) {
+    goto cleanup;
+  }
+
+  size_t final_length = output_len < mac_length ? output_len : mac_length;
+
+  if (output == NULL || output_len == 0 || output_len > 32) {
+    goto cleanup;
+  }
+
+  memcpy(output, D, final_length);
+  memset(D, 0, sizeof(D));
+
+cleanup:
+  km_crypto_zero(D, sizeof(D));
+  psa_mac_abort(&operation);
+  if (status != PSA_SUCCESS) {
+    ESP_LOGE(TAG, "Could not HMAC the KDF");
+    return false;
+  }
+  return true;
 }
 
-size_t km_crypto_decrypt(km_memory_pool_t *pool,
-                         km_key_decrypt_params_t *params, uint8_t **out) {
-  psa_algorithm_t alg;
-  switch (params->key->type) {
-  case km_key_type_aes:
-    alg = PSA_ALG_GCM;
-    break;
-  default:
-    ESP_LOGE(TAG, "Unsupported key type");
-    return false;
-  }
-
-  size_t plaintext_size =
-      PSA_AEAD_DECRYPT_OUTPUT_MAX_SIZE(params->ciphertext_length);
-  uint8_t *plaintext = km_memory_alloc(pool, plaintext_size);
-  size_t plaintext_length = 0;
-
-  psa_status_t err = psa_aead_decrypt(
-      params->key->slot, alg, params->nonce, 12, NULL, 0, params->ciphertext,
-      params->ciphertext_length, plaintext, plaintext_size, &plaintext_length);
-  if (err != PSA_SUCCESS) {
-    ESP_LOGE(TAG, "Could not encrypt plaintext");
-    return false;
-  }
-
-  *out = plaintext;
-  return plaintext_length;
+void km_crypto_zero(void *buffer, size_t len) {
+  mbedtls_platform_zeroize(buffer, len);
 }

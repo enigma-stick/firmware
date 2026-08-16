@@ -1,15 +1,14 @@
 #include "se05x_esp.h"
 
-#include "se05x_APDU.h"
+#include "fsl_sss_se05x_policy.h"
 #include "fsl_sss_user_apis.h"
 #include "mbedtls/platform_util.h"
 #include "sdkconfig.h"
+#include "se05x_APDU.h"
 #include "sm_types.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-#define SE05X_ESP_AES_AUTH_KEY_SIZE 16u
 
 typedef struct {
   sss_session_t host_session;
@@ -196,6 +195,56 @@ sss_status_t se05x_esp_session_open_aes_key(
 
   session->is_open = true;
   return kStatus_SSS_Success;
+}
+
+sss_status_t se05x_esp_create_aes_auth_object(
+    se05x_esp_session_t *session, uint32_t authentication_object_id,
+    const uint8_t authentication_key[SE05X_ESP_AES_AUTH_KEY_SIZE],
+    uint16_t maximum_attempts, sss_policy_t *policies) {
+  if (session == NULL || !session->is_open ||
+      authentication_object_id == 0 || authentication_key == NULL ||
+      policies == NULL || policies->nPolicies == 0 ||
+      policies->nPolicies > SSS_POLICY_COUNT_MAX) {
+    return kStatus_SSS_InvalidArgument;
+  }
+
+  for (size_t i = 0; i < policies->nPolicies; ++i) {
+    if (policies->policies[i] == NULL) {
+      return kStatus_SSS_InvalidArgument;
+    }
+  }
+
+  SE05x_Result_t exists = kSE05x_Result_NA;
+  smStatus_t sm_status = Se05x_API_CheckObjectExists(
+      &session->sss.s_ctx, authentication_object_id, &exists);
+  if (sm_status != SM_OK) {
+    return kStatus_SSS_Fail;
+  }
+  if (exists == kSE05x_Result_SUCCESS) {
+    return kStatus_SSS_ResourceBusy;
+  }
+  if (exists != kSE05x_Result_FAILURE) {
+    return kStatus_SSS_Fail;
+  }
+
+  uint8_t policy_buffer[MAX_POLICY_BUFFER_SIZE] = {0};
+  size_t policy_length = 0;
+  sss_status_t status = sss_se05x_create_object_policy_buffer(
+      policies, policy_buffer, &policy_length);
+  if (status != kStatus_SSS_Success || policy_length == 0) {
+    return status == kStatus_SSS_Success ? kStatus_SSS_Fail : status;
+  }
+
+  Se05xPolicy_t policy = {
+      .value = policy_buffer,
+      .value_len = policy_length,
+  };
+  sm_status = Se05x_API_WriteSymmKey_Ver(
+      &session->sss.s_ctx, &policy, maximum_attempts,
+      authentication_object_id, SE05x_KeyID_KEK_NONE, authentication_key,
+      SE05X_ESP_AES_AUTH_KEY_SIZE, kSE05x_INS_AUTH_OBJECT,
+      kSE05x_SymmKeyType_AES, 0);
+  return sm_status == SM_OK ? kStatus_SSS_Success : kStatus_SSS_Fail;
 }
 
 void se05x_esp_session_close(se05x_esp_session_t *session) {
