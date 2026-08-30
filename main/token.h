@@ -3,6 +3,7 @@
 
 #include "esp_err.h"
 #include "se05x_esp.h"
+#include "se_worker.h"
 #include <stdint.h>
 
 #define KEYMGR_TOKEN_METADATA_VERSION 0x01u
@@ -34,6 +35,11 @@ typedef struct {
   uint32_t se_hmac_id;
 } km_token_metadata_t;
 
+typedef struct {
+  km_token_state_t token_state;
+  se_worker_session_state_t session_state;
+} km_token_status_t;
+
 /** Load the token record, creating an uninitialized record when it is absent.
  */
 esp_err_t km_token_init(void);
@@ -41,6 +47,13 @@ esp_err_t km_token_init(void);
 /** Return the loaded metadata, or NULL if km_token_init has not succeeded. */
 const km_token_metadata_t *km_token_get_metadata(void);
 
+/** provision token keys **/
 esp_err_t km_token_provision(char *pin, size_t pin_length);
+
+/** derive auth key from PIN **/
+esp_err_t km_token_authenticate(char *pin, size_t pin_length);
+
+/** get token and session status **/
+esp_err_t km_token_get_status(km_token_status_t *token_status);
 
 #endif // KEYMGR_TOKEN_H

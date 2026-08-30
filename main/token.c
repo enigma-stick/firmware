@@ -169,16 +169,11 @@ const km_token_metadata_t *km_token_get_metadata(void) {
   return token_metadata_loaded ? &token_metadata : NULL;
 }
 
-static esp_err_t km_token_provision_generate_keys(char *pin,
-                                                  size_t pin_length) {
+static esp_err_t token_derive_auth_key(char *pin, size_t pin_length,
+                                       uint8_t key[16]) {
   uint8_t derived_material[32] = {0};
   uint8_t K[16] = {0};
   esp_err_t result = ESP_FAIL;
-
-  if (!km_crypto_generate_hmac(token_metadata.esp_key_id)) {
-    ESP_LOGE(TAG, "Could not generate auth HMAC");
-    goto cleanup;
-  }
 
   if (!km_crypto_pbkdf2(token_metadata.pbkdf2_rounds, token_metadata.salt,
                         sizeof(token_metadata.salt), (uint8_t *)pin, pin_length,
@@ -194,7 +189,30 @@ static esp_err_t km_token_provision_generate_keys(char *pin,
     ESP_LOGE(TAG, "Could not HMAC the PIN material");
     goto cleanup;
   }
+
+  memcpy(key, K, sizeof(K));
+  result = ESP_OK;
+
+cleanup:
   km_crypto_zero(derived_material, sizeof(derived_material));
+  km_crypto_zero(K, sizeof(K));
+  return result;
+}
+
+static esp_err_t km_token_provision_generate_keys(char *pin,
+                                                  size_t pin_length) {
+  uint8_t K[16] = {0};
+  esp_err_t result = ESP_FAIL;
+
+  if (!km_crypto_generate_hmac(token_metadata.esp_key_id)) {
+    ESP_LOGE(TAG, "Could not generate auth HMAC");
+    goto cleanup;
+  }
+
+  if (token_derive_auth_key(pin, pin_length, K) != ESP_OK) {
+    ESP_LOGE(TAG, "Could not derive auth key");
+    goto cleanup;
+  }
 
   if (km_se_worker_provision_auth_object(token_metadata.se_auth_object_id, K) !=
       ESP_OK) {
@@ -211,7 +229,6 @@ static esp_err_t km_token_provision_generate_keys(char *pin,
   result = ESP_OK;
 
 cleanup:
-  km_crypto_zero(derived_material, sizeof(derived_material));
   km_crypto_zero(K, sizeof(K));
   return result;
 }
@@ -286,6 +303,47 @@ esp_err_t km_token_provision(char *pin, size_t pin_length) {
   }
 
   ESP_LOGI(TAG, "Token provisioning completed; state is READY");
+
+  return ESP_OK;
+}
+
+esp_err_t km_token_authenticate(char *pin, size_t pin_length) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot provision before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (pin == NULL || pin_length == 0) {
+    ESP_LOGE(TAG, "Cannot provision with an empty PIN");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (token_metadata.state != KM_TOKEN_READY) {
+    ESP_LOGE(TAG, "Token is not provisioned");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t K[16];
+  esp_err_t err = token_derive_auth_key(pin, pin_length, K);
+  if (err == ESP_OK) {
+    err = km_se_worker_open_session(token_metadata.se_auth_object_id, K);
+  }
+
+  km_crypto_zero(K, sizeof(K));
+  return err;
+}
+
+esp_err_t km_token_get_status(km_token_status_t *token_status) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot provision before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  token_status->token_state = token_metadata.state;
+  if (km_se_worker_get_session_state(&token_status->session_state) != ESP_OK) {
+    ESP_LOGE(TAG, "Could not retrieve SE05X session state");
+    return ESP_FAIL;
+  }
 
   return ESP_OK;
 }

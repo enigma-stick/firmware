@@ -11,12 +11,17 @@
 
 enum km_command_type {
   km_command_ping = 0x01,
+  km_command_status = 0x02,
   km_command_init = 0x10,
+  km_command_authenticate = 0x11,
+  km_command_lock = 0x12
 };
 
 enum km_command_response_type {
-  km_command_response_error = 0xFF,
   km_command_response_ok = 0x00,
+  km_command_response_auth_required = 0x01,
+  km_command_response_status = 0x02,
+  km_command_response_error = 0xFF,
 };
 
 typedef struct _frame_header {

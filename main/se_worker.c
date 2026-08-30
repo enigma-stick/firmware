@@ -352,6 +352,43 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_open_session_impl(se_worker_context_t *ctx,
+                                             uint32_t auth_object_id,
+                                             const uint8_t key[16]) {
+  if (ctx->session_state != SE_WORKER_SESSION_CLOSED) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Opening authenticated session with object %08" PRIx32,
+           auth_object_id);
+  sss_status_t status = se05x_esp_session_open_aes_key(
+      &ctx->session, auth_object_id, key, SE05X_ESP_AES_AUTH_KEY_SIZE);
+
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG,
+             "Authentication with object %08" PRIx32 " failed: status=0x%08x",
+             auth_object_id, (unsigned)status);
+    return ESP_FAIL;
+  }
+
+  ctx->session_state = SE_WORKER_SESSION_AUTHENTICATED;
+  ctx->auth_object_id = auth_object_id;
+  ESP_LOGI(TAG, "Authenticated SE051 session opened");
+
+  return ESP_OK;
+}
+
+static esp_err_t
+se_worker_get_session_state_impl(se_worker_context_t *ctx,
+                                 se_worker_session_state_t *state) {
+  if (state == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *state = ctx->session_state;
+  return ESP_OK;
+}
+
 static esp_err_t handle_request(se_worker_context_t *ctx,
                                 se_request_t *request) {
   switch (request->type) {
@@ -365,6 +402,13 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
   case SE_REQUEST_PROVISION_HMAC_MASTER:
     return se_worker_provision_hmac_master_impl(
         ctx, request->args.provision_hmac_master.object_id);
+  case SE_REQUEST_OPEN_SESSION:
+    return se_worker_open_session_impl(ctx,
+                                       request->args.open_session.object_id,
+                                       request->args.open_session.auth_key);
+  case SE_REQUEST_GET_SESSION_STATE:
+    return se_worker_get_session_state_impl(
+        ctx, request->args.get_session_state.state);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -467,5 +511,44 @@ esp_err_t km_se_worker_provision_hmac_master(uint32_t object_id) {
   }
 
   xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_open_session(uint32_t object_id, const uint8_t key[16]) {
+  se_request_t request = {.type = SE_REQUEST_OPEN_SESSION,
+                          .args.open_session = {.object_id = object_id}};
+  memcpy(request.args.open_session.auth_key, key, 16);
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue open session request");
+    km_crypto_zero(request.args.open_session.auth_key, 16);
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+
+  km_crypto_zero(request.args.open_session.auth_key, 16);
+  return request.result;
+}
+
+esp_err_t km_se_worker_get_session_state(se_worker_session_state_t *state) {
+  se_request_t request = {.type = SE_REQUEST_GET_SESSION_STATE,
+                          .args.get_session_state = {.state = state}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue get session state request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+
   return request.result;
 }
