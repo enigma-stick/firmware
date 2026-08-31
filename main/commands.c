@@ -145,6 +145,11 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_lock(void) {
+  km_se_worker_close_session();
+  km_usb_write_success();
+}
+
 void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
@@ -166,6 +171,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_status:
     km_command_handle_status();
+    break;
+  case km_command_lock:
+    km_command_handle_lock();
     break;
   default:
     km_usb_write_error("Invalid command");

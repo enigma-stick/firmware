@@ -21,6 +21,7 @@ typedef enum {
   SE_REQUEST_PROVISION_AUTH_OBJECT,
   SE_REQUEST_PROVISION_HMAC_MASTER,
   SE_REQUEST_OPEN_SESSION,
+  SE_REQUEST_CLOSE_SESSION,
   SE_REQUEST_GET_SESSION_STATE,
 } se_request_type_t;
 
@@ -79,6 +80,7 @@ esp_err_t km_se_worker_provision_auth_object(uint32_t object_id,
 esp_err_t km_se_worker_provision_hmac_master(uint32_t object_id);
 esp_err_t km_se_worker_open_session(uint32_t object_id,
                                     const uint8_t auth_key[16]);
+esp_err_t km_se_worker_close_session(void);
 esp_err_t km_se_worker_get_session_state(se_worker_session_state_t *state);
 
 #endif // KEYMGR_SE_WORKER_H

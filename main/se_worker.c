@@ -3,14 +3,13 @@
 #include "esp_log.h"
 #include "freertos/idf_additions.h"
 #include "fsl_sss_api.h"
-#include "fsl_sss_se05x_apis.h"
 #include "se05x_esp.h"
-#include "se05x_esp_admin.h"
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define KEYMGR_SE_WORKER_STACK_SIZE (16 * 1024) // 16 KB
+#define KEYMGR_SE_WORKER_TIMEOUT pdMS_TO_TICKS(10 * 60 * 1000)
 
 static const char *TAG = "keymgr_se_worker";
 static se_worker_context_t *ctx;
@@ -115,6 +114,7 @@ static esp_err_t se_worker_provision_auth_object_impl(se_worker_context_t *ctx,
 
   ctx->session_state = SE_WORKER_SESSION_AUTHENTICATED;
   ctx->auth_object_id = object_id;
+  ctx->last_activity = xTaskGetTickCount();
   ESP_LOGI(TAG, "Authenticated SE051 session opened");
 
   return ESP_OK;
@@ -373,8 +373,32 @@ static esp_err_t se_worker_open_session_impl(se_worker_context_t *ctx,
 
   ctx->session_state = SE_WORKER_SESSION_AUTHENTICATED;
   ctx->auth_object_id = auth_object_id;
+  ctx->last_activity = xTaskGetTickCount();
   ESP_LOGI(TAG, "Authenticated SE051 session opened");
 
+  return ESP_OK;
+}
+
+static esp_err_t se_worker_close_session_impl(se_worker_context_t *ctx) {
+  if (ctx->key_store_initialized) {
+    sss_key_store_context_free(&ctx->key_store);
+    memset(&ctx->key_store, 0, sizeof(ctx->key_store));
+    ctx->key_store_initialized = false;
+  }
+
+  if (ctx->session.is_open) {
+    se05x_esp_session_close(&ctx->session);
+  }
+
+  ctx->session_state = SE_WORKER_SESSION_CLOSED;
+  ctx->auth_object_id = 0;
+  ctx->last_activity = 0;
+
+  // I think this is unused and should probably stay that way. To be safe, we
+  // clear it. Later on, we can remove this.
+  km_crypto_zero(ctx->auth_key, sizeof(ctx->auth_key));
+
+  ESP_LOGI(TAG, "SE051 session closed");
   return ESP_OK;
 }
 
@@ -406,6 +430,8 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
     return se_worker_open_session_impl(ctx,
                                        request->args.open_session.object_id,
                                        request->args.open_session.auth_key);
+  case SE_REQUEST_CLOSE_SESSION:
+    return se_worker_close_session_impl(ctx);
   case SE_REQUEST_GET_SESSION_STATE:
     return se_worker_get_session_state_impl(
         ctx, request->args.get_session_state.state);
@@ -418,12 +444,34 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
 void se_worker_start_task(void *_ctx) {
   for (;;) {
     se_request_t *request;
+    TickType_t wait = portMAX_DELAY;
 
-    if (xQueueReceive(ctx->queue, &request, portMAX_DELAY) == pdTRUE) {
+    if (ctx->session_state == SE_WORKER_SESSION_AUTHENTICATED) {
+      TickType_t elapsed = xTaskGetTickCount() - ctx->last_activity;
+
+      if (elapsed >= KEYMGR_SE_WORKER_TIMEOUT) {
+        se_worker_close_session_impl(ctx);
+      } else {
+        wait = KEYMGR_SE_WORKER_TIMEOUT - elapsed;
+      }
+    }
+
+    if (xQueueReceive(ctx->queue, &request, wait) == pdTRUE) {
+
+      if (ctx->session_state == SE_WORKER_SESSION_AUTHENTICATED) {
+        TickType_t elapsed = xTaskGetTickCount() - ctx->last_activity;
+
+        if (elapsed >= KEYMGR_SE_WORKER_TIMEOUT) {
+          se_worker_close_session_impl(ctx);
+        }
+      }
+
       request->result = handle_request(ctx, request);
       xSemaphoreGive(request->completion);
     } else {
-      // TODO: close_session
+      if (ctx->session_state == SE_WORKER_SESSION_AUTHENTICATED) {
+        se_worker_close_session_impl(ctx);
+      }
     }
   }
 }
@@ -532,6 +580,22 @@ esp_err_t km_se_worker_open_session(uint32_t object_id, const uint8_t key[16]) {
   xSemaphoreTake(request.completion, portMAX_DELAY);
 
   km_crypto_zero(request.args.open_session.auth_key, 16);
+  return request.result;
+}
+
+esp_err_t km_se_worker_close_session(void) {
+  se_request_t request = {.type = SE_REQUEST_CLOSE_SESSION};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue close session request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
   return request.result;
 }
 
