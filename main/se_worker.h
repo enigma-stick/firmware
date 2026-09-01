@@ -10,6 +10,8 @@
 #define KEYMGR_SE_ECDH_KEY_A_ID 0x4B4DFF33u
 #define KEYMGR_SE_ECDH_KEY_B_ID 0x4B4DFF34u
 
+#define KM_ERR_AUTH_REQUIRED 0xf000
+
 typedef enum {
   SE_WORKER_SESSION_CLOSED,
   SE_WORKER_SESSION_AUTHENTICATED,
@@ -23,6 +25,7 @@ typedef enum {
   SE_REQUEST_OPEN_SESSION,
   SE_REQUEST_CLOSE_SESSION,
   SE_REQUEST_GET_SESSION_STATE,
+  SE_REQUEST_GENERATE_AES
 } se_request_type_t;
 
 typedef struct _request_t {
@@ -56,6 +59,12 @@ typedef struct _request_t {
     struct {
       se_worker_session_state_t *state;
     } get_session_state;
+
+    struct {
+      uint32_t hmac_id;
+      uint16_t bits;
+      uint32_t *key_id;
+    } generate_aes;
   } args;
 } se_request_t;
 
@@ -82,5 +91,7 @@ esp_err_t km_se_worker_open_session(uint32_t object_id,
                                     const uint8_t auth_key[16]);
 esp_err_t km_se_worker_close_session(void);
 esp_err_t km_se_worker_get_session_state(se_worker_session_state_t *state);
+esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
+                                    uint32_t *key_id);
 
 #endif // KEYMGR_SE_WORKER_H

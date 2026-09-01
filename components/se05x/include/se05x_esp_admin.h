@@ -111,4 +111,9 @@ se05x_esp_admin_status_t se05x_esp_admin_get_object_attributes(
     se05x_esp_session_t *session, uint32_t object_id,
     se05x_esp_admin_object_attributes_t *attributes);
 
+/** Check whether an object exists on the SE051 device. */
+se05x_esp_admin_status_t
+se05x_esp_admin_object_exists(se05x_esp_session_t *session, uint32_t object_id,
+                              bool *exists);
+
 #endif

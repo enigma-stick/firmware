@@ -56,4 +56,8 @@ esp_err_t km_token_authenticate(char *pin, size_t pin_length);
 /** get token and session status **/
 esp_err_t km_token_get_status(km_token_status_t *token_status);
 
+/** generate AES key **/
+esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
+                                uint32_t *key_id);
+
 #endif // KEYMGR_TOKEN_H

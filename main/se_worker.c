@@ -4,6 +4,7 @@
 #include "freertos/idf_additions.h"
 #include "fsl_sss_api.h"
 #include "se05x_esp.h"
+#include "se05x_esp_admin.h"
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,8 +12,36 @@
 #define KEYMGR_SE_WORKER_STACK_SIZE (16 * 1024) // 16 KB
 #define KEYMGR_SE_WORKER_TIMEOUT pdMS_TO_TICKS(10 * 60 * 1000)
 
+#define KEYMGR_SE_APP_KEY_FIRST 0x4B4D1000u
+#define KEYMGR_SE_APP_KEY_LAST 0x4B4DEFFFu
+
 static const char *TAG = "keymgr_se_worker";
 static se_worker_context_t *ctx;
+
+static esp_err_t se_worker_init_keystore(se_worker_context_t *ctx) {
+  if (ctx->key_store_initialized == true) {
+    return ESP_OK;
+  }
+
+  sss_status_t status = sss_key_store_context_init(
+      &ctx->key_store, (sss_session_t *)&ctx->session.sss);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize SE051 key store: status=0x%08x",
+             (unsigned)status);
+    return ESP_FAIL;
+  }
+
+  status = sss_key_store_allocate(&ctx->key_store, 0);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not allocate SE051 key store: status=0x%08x",
+             (unsigned)status);
+    sss_key_store_context_free(&ctx->key_store);
+    return ESP_FAIL;
+  }
+
+  ctx->key_store_initialized = true;
+  return ESP_OK;
+}
 
 static esp_err_t se_worker_get_uid_impl(se_worker_context_t *ctx, uint8_t *uid,
                                         size_t *length) {
@@ -413,8 +442,194 @@ se_worker_get_session_state_impl(se_worker_context_t *ctx,
   return ESP_OK;
 }
 
+static esp_err_t se_worker_generate_aes_impl(se_worker_context_t *ctx,
+                                             uint32_t hmac_id, uint16_t bits,
+                                             uint32_t *key_id) {
+  if (hmac_id == 0 || key_id == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *key_id = 0;
+  sss_object_t master = {0};
+  sss_object_t destination = {0};
+  sss_derive_key_t derive = {0};
+  size_t key_bytes = bits / 8;
+  bool placeholder_created = false;
+  bool master_initialized = false;
+  bool destination_initialized = false;
+  bool derive_initialized = false;
+
+  if (bits != 128 && bits != 192 && bits != 256) {
+    ESP_LOGE(TAG, "Invalid provided bits for AES key generation");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  // TODO: we need to move and improve this LOL
+  uint32_t obj_id = KEYMGR_SE_APP_KEY_FIRST;
+  bool exists = false;
+  for (; obj_id <= KEYMGR_SE_APP_KEY_LAST; obj_id++) {
+    se05x_esp_admin_status_t result =
+        se05x_esp_admin_object_exists(&ctx->session, obj_id, &exists);
+
+    if (result != SE05X_ESP_ADMIN_OK) {
+      ESP_LOGE(TAG, "Could not determine if object exists during object scan");
+      return ESP_FAIL;
+    }
+
+    if (!exists) {
+      break;
+    }
+  }
+  if (exists) {
+    ESP_LOGE(TAG, "Could not find free object");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Destination key ID = %08" PRIx32, obj_id);
+
+  sss_status_t status;
+
+  status = sss_key_object_init(&master, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not init handle to HMAC master key");
+    goto cleanup;
+  }
+  master_initialized = true;
+
+  bool master_exists = false;
+  se05x_esp_admin_status_t admin_status =
+      se05x_esp_admin_object_exists(&ctx->session, hmac_id, &master_exists);
+
+  if (admin_status != SE05X_ESP_ADMIN_OK || !master_exists) {
+    ESP_LOGE(TAG, "HMAC master %08" PRIx32 " does not exist", hmac_id);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_object_allocate_handle(
+      &master, hmac_id, kSSS_KeyPart_Default, kSSS_CipherType_HMAC, 32,
+      kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not configure HMAC master handle");
+    goto cleanup;
+  }
+
+  status = sss_key_object_init(&destination, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not init handle to destination AES key");
+    goto cleanup;
+  }
+  destination_initialized = true;
+
+  status = sss_key_object_allocate_handle(
+      &destination, obj_id, kSSS_KeyPart_Default, kSSS_CipherType_AES,
+      key_bytes, kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not allocate handle to destination AES key");
+    goto cleanup;
+  }
+
+  sss_policy_u common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {.can_Write = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u aes_policy = {.type = KPolicy_Sym_Key,
+                             .auth_obj_id = ctx->auth_object_id,
+                             .policy.symmkey = {.can_Encrypt = 1,
+                                                .can_Decrypt = 1,
+                                                .forbid_Derived_Output = 1}};
+
+  sss_policy_t policies = {.policies = {&common_policy, &aes_policy},
+                           .nPolicies = 2};
+
+  uint8_t placeholder[32] = {0};
+  if (!km_crypto_rand(placeholder, sizeof(placeholder))) {
+    ESP_LOGE(TAG, "Could not generate HMAC destination placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_store_set_key(&ctx->key_store, &destination, placeholder,
+                                 key_bytes, bits, &policies, sizeof(policies));
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not set destination key policies");
+    goto cleanup;
+  }
+  placeholder_created = true;
+  km_crypto_zero(placeholder, sizeof(placeholder));
+
+  status = sss_derive_key_context_init(
+      &derive, (sss_session_t *)&ctx->session.sss, &master,
+      kAlgorithm_SSS_SHA256, kMode_SSS_HKDF_ExtractExpand);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize derivation context");
+    goto cleanup;
+  }
+  derive_initialized = true;
+
+  uint8_t salt[32] = {0};
+  const char *info = "keymgr/aes/v1";
+  if (!km_crypto_rand(salt, sizeof(salt))) {
+    ESP_LOGE(TAG, "Could not generate HMAC destination placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_derive_key_one_go(&derive, salt, sizeof(salt), (uint8_t *)info,
+                                 strlen(info), &destination, key_bytes);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not derive AES key from HMAC master");
+    goto cleanup;
+  }
+
+cleanup:
+  km_crypto_zero(placeholder, sizeof(placeholder));
+
+  esp_err_t esp_status;
+  if (status != kStatus_SSS_Success) {
+    if (placeholder_created) {
+      sss_key_store_erase_key(&ctx->key_store, &destination);
+    }
+    esp_status = ESP_FAIL;
+  } else {
+    *key_id = obj_id;
+    esp_status = ESP_OK;
+    ctx->last_activity = xTaskGetTickCount();
+  }
+
+  if (derive_initialized)
+    sss_derive_key_context_free(&derive);
+  if (destination_initialized)
+    sss_key_object_free(&destination);
+  if (master_initialized)
+    sss_key_object_free(&master);
+
+  return esp_status;
+}
+
+static bool se_request_requires_auth(se_request_type_t type) {
+  switch (type) {
+  case SE_REQUEST_PROVISION_HMAC_MASTER:
+  case SE_REQUEST_GENERATE_AES:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static esp_err_t handle_request(se_worker_context_t *ctx,
                                 se_request_t *request) {
+  if (se_request_requires_auth(request->type) &&
+      ctx->session_state != SE_WORKER_SESSION_AUTHENTICATED) {
+    return KM_ERR_AUTH_REQUIRED;
+  }
+
   switch (request->type) {
   case SE_REQUEST_GET_UID:
     return se_worker_get_uid_impl(ctx, request->args.get_uid.buffer,
@@ -435,6 +650,10 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
   case SE_REQUEST_GET_SESSION_STATE:
     return se_worker_get_session_state_impl(
         ctx, request->args.get_session_state.state);
+  case SE_REQUEST_GENERATE_AES:
+    return se_worker_generate_aes_impl(ctx, request->args.generate_aes.hmac_id,
+                                       request->args.generate_aes.bits,
+                                       request->args.generate_aes.key_id);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -614,5 +833,25 @@ esp_err_t km_se_worker_get_session_state(se_worker_session_state_t *state) {
 
   xSemaphoreTake(request.completion, portMAX_DELAY);
 
+  return request.result;
+}
+
+esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
+                                    uint32_t *key_id) {
+  se_request_t request = {.type = SE_REQUEST_GENERATE_AES,
+                          .args.generate_aes = {.hmac_id = hmac_id,
+                                                .bits = bits,
+                                                .key_id = key_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue generate aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
   return request.result;
 }

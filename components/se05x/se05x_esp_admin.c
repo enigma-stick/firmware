@@ -117,6 +117,23 @@ se05x_admin_object_exists(se05x_esp_session_t *session, uint32_t object_id,
   return SE05X_ESP_ADMIN_PROTOCOL_ERROR;
 }
 
+se05x_esp_admin_status_t
+se05x_esp_admin_object_exists(se05x_esp_session_t *session, uint32_t object_id,
+                              bool *exists) {
+  if (exists == NULL) {
+    return SE05X_ESP_ADMIN_INVALID_ARGUMENT;
+  }
+
+  *exists = false;
+
+  se05x_esp_admin_status_t status = se05x_admin_validate_session(session);
+  if (status != SE05X_ESP_ADMIN_OK) {
+    return status;
+  }
+
+  return se05x_admin_object_exists(session, object_id, exists);
+}
+
 const char *se05x_esp_admin_status_name(se05x_esp_admin_status_t status) {
   switch (status) {
   case SE05X_ESP_ADMIN_OK:
