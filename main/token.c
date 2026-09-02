@@ -349,6 +349,43 @@ esp_err_t km_token_get_status(km_token_status_t *token_status) {
   return ESP_OK;
 }
 
+esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
+                                    km_key_metadata_t *out) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Token metadata is not loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (out == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  char name[15] = {0};
+  snprintf(name, sizeof(name), "km:%08" PRIx32, key_id);
+  uint8_t *data;
+  size_t len;
+  esp_err_t status = km_store_read_alloc(pool, name, (void *)&data, &len);
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "Could not read metadata for key %08" PRIx32 ": %s", key_id,
+             esp_err_to_name(status));
+    return status;
+  }
+
+  km_deserializer_t *dz = km_dz_init_move(pool, data, len);
+
+  uint32_t type;
+  if (!km_dz_u32(dz, &type) || !km_dz_u16(dz, &out->size) ||
+      !km_dz_str(pool, dz, &out->label)) {
+    ESP_LOGE(TAG, "Could not deserialize key metadata from NVS");
+    return ESP_FAIL;
+  }
+  out->type = (km_key_type_t)type;
+  out->id = key_id;
+
+  return ESP_OK;
+}
+
 esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
                                 uint32_t *key_id) {
 
@@ -368,7 +405,7 @@ esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
   snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
 
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_u32(sz, 0x01); // TODO: shared enum or something
+  km_sz_u32(sz, km_key_type_aes);
   km_sz_u16(sz, bits);
   km_sz_str(sz, label);
 
@@ -378,5 +415,35 @@ esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
   }
 
   km_sz_free(sz);
+  return status;
+}
+
+esp_err_t km_token_encrypt_aes_gcm(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *plaintext,
+                                   size_t plaintext_len, uint8_t **ciphertext,
+                                   size_t *ciphertext_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform encryption before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_encrypt_aes_gcm(
+      pool, key, plaintext, plaintext_len, ciphertext, ciphertext_len);
+
+  return status;
+}
+
+esp_err_t km_token_decrypt_aes_gcm(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *ciphertext,
+                                   size_t ciphertext_len, uint8_t **plaintext,
+                                   size_t *plaintext_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform decryption before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_decrypt_aes_gcm(
+      pool, key, ciphertext, ciphertext_len, plaintext, plaintext_len);
+
   return status;
 }

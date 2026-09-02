@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define USB_BUFFER_SIZE 256
+#define USB_BUFFER_SIZE 512
 
 static const char *TAG = "keymgr_usb";
 
@@ -27,7 +27,13 @@ void km_usb_write_response(enum km_command_response_type type,
     return;
   }
 
-  usb_serial_jtag_write_bytes(buffer, frame_len, 20 / portTICK_PERIOD_MS);
+  int written =
+      usb_serial_jtag_write_bytes(buffer, frame_len, 20 / portTICK_PERIOD_MS);
+
+  if (written != frame_len) {
+    ESP_LOGE(TAG, "USB response truncated: wrote %d of %zu bytes", written,
+             frame_len);
+  }
   free(buffer);
 }
 

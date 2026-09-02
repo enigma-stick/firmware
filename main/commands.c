@@ -2,6 +2,7 @@
 #include "app.h"
 #include "crypto.h"
 #include "esp_log.h"
+#include "key.h"
 #include "led_status.h"
 #include "memory.h"
 #include "protocol.h"
@@ -91,6 +92,78 @@ size_t km_command_response_generate_key_serialize(
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
 
   km_sz_u32(sz, response->key_id);
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
+bool km_command_encrypt_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_encrypt_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_encrypt_t command;
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  if (!km_dz_u32(dz, &command.key_id) ||
+      !km_dz_u32(dz, (uint32_t *)&command.plaintext_len)) {
+    return false;
+  }
+
+  command.plaintext = km_memory_alloc(pool, command.plaintext_len);
+  km_dz_array(km_dz_u8, dz, command.plaintext, command.plaintext_len);
+
+  *out = command;
+  return true;
+}
+
+size_t km_command_response_encrypt_serialize(
+    km_memory_pool_t *pool, const km_command_response_encrypt_t *response,
+    uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_array(km_sz_u8, sz, response->ciphertext, response->ciphertext_len);
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
+bool km_command_decrypt_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_decrypt_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_decrypt_t command;
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  if (!km_dz_u32(dz, &command.key_id) ||
+      !km_dz_u32(dz, (uint32_t *)&command.ciphertext_len)) {
+    return false;
+  }
+
+  command.ciphertext = km_memory_alloc(pool, command.ciphertext_len);
+  km_dz_array(km_dz_u8, dz, command.ciphertext, command.ciphertext_len);
+
+  *out = command;
+  return true;
+}
+
+size_t km_command_response_decrypt_serialize(
+    km_memory_pool_t *pool, const km_command_response_decrypt_t *response,
+    uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_array(km_sz_u8, sz, response->plaintext, response->plaintext_len);
 
   size_t len = sz->len;
   *out = km_memory_alloc(pool, len);
@@ -234,6 +307,126 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_encrypt(const km_frame_header_t *frame_header,
+                                      const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_encrypt_t command;
+  if (!km_command_encrypt_deserialize(pool, payload, frame_header->length,
+                                      &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_metadata_t key_meta;
+  esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
+  if (status != ESP_OK) {
+    km_usb_write_error("Could not retrieve key metadata");
+    goto cleanup;
+  }
+
+  uint8_t *ciphertext;
+  size_t ciphertext_len;
+
+  switch (key_meta.type) {
+  case km_key_type_aes:
+    status = km_token_encrypt_aes_gcm(pool, &key_meta, command.plaintext,
+                                      command.plaintext_len, &ciphertext,
+                                      &ciphertext_len);
+    break;
+  default:
+    km_usb_write_error("Unsupported key type for requsted operation");
+    goto cleanup;
+  }
+
+  if (status == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "encryption failed: %s", esp_err_to_name(status));
+    km_usb_write_error("Encryption failed");
+    goto cleanup;
+  }
+
+  km_command_response_encrypt_t response;
+  response.ciphertext = ciphertext;
+  response.ciphertext_len = ciphertext_len;
+  uint8_t *out;
+  size_t out_len = km_command_response_encrypt_serialize(pool, &response, &out);
+
+  if (out_len == 0) {
+    km_usb_write_error("Could not serialize command response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_encrypt, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
+static void km_command_handle_decrypt(const km_frame_header_t *frame_header,
+                                      const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_decrypt_t command;
+  if (!km_command_decrypt_deserialize(pool, payload, frame_header->length,
+                                      &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_metadata_t key_meta;
+  esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
+  if (status != ESP_OK) {
+    km_usb_write_error("Could not retrieve key metadata");
+    goto cleanup;
+  }
+
+  uint8_t *plaintext;
+  size_t plaintext_len;
+
+  switch (key_meta.type) {
+  case km_key_type_aes:
+    status = km_token_decrypt_aes_gcm(pool, &key_meta, command.ciphertext,
+                                      command.ciphertext_len, &plaintext,
+                                      &plaintext_len);
+    break;
+  default:
+    km_usb_write_error("Unsupported key type for requsted operation");
+    goto cleanup;
+  }
+
+  if (status == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "decryption failed: %s", esp_err_to_name(status));
+    km_usb_write_error("Decryption failed");
+    goto cleanup;
+  }
+
+  km_command_response_decrypt_t response;
+  response.plaintext = plaintext;
+  response.plaintext_len = plaintext_len;
+  uint8_t *out;
+  size_t out_len = km_command_response_decrypt_serialize(pool, &response, &out);
+
+  if (out_len == 0) {
+    km_usb_write_error("Could not serialize command response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_decrypt, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
 void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
@@ -261,6 +454,12 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_generate_key:
     km_command_handle_generate_key(frame_header, payload);
+    break;
+  case km_command_encrypt:
+    km_command_handle_encrypt(frame_header, payload);
+    break;
+  case km_command_decrypt:
+    km_command_handle_decrypt(frame_header, payload);
     break;
   default:
     km_usb_write_error("Invalid command");

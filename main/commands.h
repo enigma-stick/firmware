@@ -49,6 +49,52 @@ size_t km_command_response_generate_key_serialize(
     km_memory_pool_t *pool, const km_command_response_generate_key_t *response,
     uint8_t **out);
 
+// km_command_encrypt
+
+typedef struct {
+  uint32_t key_id;
+  uint8_t *plaintext;
+  size_t plaintext_len;
+} km_command_encrypt_t;
+
+bool km_command_encrypt_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_encrypt_t *out);
+
+// encrypt response
+
+typedef struct {
+  uint8_t *ciphertext;
+  size_t ciphertext_len;
+} km_command_response_encrypt_t;
+
+size_t km_command_response_encrypt_serialize(
+    km_memory_pool_t *pool, const km_command_response_encrypt_t *response,
+    uint8_t **out);
+
+// km_command_decrypt
+
+typedef struct {
+  uint32_t key_id;
+  uint8_t *ciphertext;
+  size_t ciphertext_len;
+} km_command_decrypt_t;
+
+bool km_command_decrypt_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_decrypt_t *out);
+
+// decrypt response
+
+typedef struct {
+  uint8_t *plaintext;
+  size_t plaintext_len;
+} km_command_response_decrypt_t;
+
+size_t km_command_response_decrypt_serialize(
+    km_memory_pool_t *pool, const km_command_response_decrypt_t *response,
+    uint8_t **out);
+
 // status response
 
 typedef struct {

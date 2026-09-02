@@ -3,8 +3,10 @@
 #include "esp_log.h"
 #include "freertos/idf_additions.h"
 #include "fsl_sss_api.h"
+#include "fsl_sss_user_apis.h"
 #include "se05x_esp.h"
 #include "se05x_esp_admin.h"
+#include "token.h"
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,10 @@
 
 #define KEYMGR_SE_APP_KEY_FIRST 0x4B4D1000u
 #define KEYMGR_SE_APP_KEY_LAST 0x4B4DEFFFu
+
+#define KM_AES_GCM_NONCE_LEN 12
+#define KM_AES_GCM_TAG_LEN 16
+#define KM_AES_GCM_OVERHEAD (KM_AES_GCM_NONCE_LEN + KM_AES_GCM_TAG_LEN)
 
 static const char *TAG = "keymgr_se_worker";
 static se_worker_context_t *ctx;
@@ -539,11 +545,10 @@ static esp_err_t se_worker_generate_aes_impl(se_worker_context_t *ctx,
       .auth_obj_id = ctx->auth_object_id,
       .policy.common = {.can_Write = 1, .can_Delete = 1, .req_Sm = 1}};
 
-  sss_policy_u aes_policy = {.type = KPolicy_Sym_Key,
-                             .auth_obj_id = ctx->auth_object_id,
-                             .policy.symmkey = {.can_Encrypt = 1,
-                                                .can_Decrypt = 1,
-                                                .forbid_Derived_Output = 1}};
+  sss_policy_u aes_policy = {
+      .type = KPolicy_Sym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.symmkey = {.can_Encrypt = 1, .can_Decrypt = 1}};
 
   sss_policy_t policies = {.policies = {&common_policy, &aes_policy},
                            .nPolicies = 2};
@@ -613,10 +618,197 @@ cleanup:
   return esp_status;
 }
 
+static esp_err_t
+se_worker_encrypt_aes_gcm_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
+                               km_key_metadata_t *key, uint8_t *plaintext,
+                               size_t plaintext_len, uint8_t **ciphertext,
+                               size_t *ciphertext_len) {
+  if (pool == NULL || key == NULL || key->id == 0 || plaintext == NULL ||
+      plaintext_len == 0 || ciphertext == NULL || ciphertext_len == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *ciphertext = NULL;
+  *ciphertext_len = 0;
+
+  sss_object_t encryption_key = {0};
+  sss_aead_t aead_ctx = {0};
+  bool encryption_key_init = false;
+  bool symmetric_init = false;
+
+  size_t blob_len = KM_AES_GCM_NONCE_LEN + plaintext_len + KM_AES_GCM_TAG_LEN;
+  uint8_t *blob = km_memory_alloc(pool, blob_len);
+  uint8_t *nonce = blob;
+  uint8_t *encrypted = blob + KM_AES_GCM_NONCE_LEN;
+  uint8_t *tag = encrypted + plaintext_len;
+  size_t tag_len = KM_AES_GCM_TAG_LEN;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&encryption_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize encryption key handle");
+    goto cleanup;
+  }
+  encryption_key_init = true;
+
+  bool encryption_key_exists = false;
+  se05x_esp_admin_status_t admin_status = se05x_esp_admin_object_exists(
+      &ctx->session, key->id, &encryption_key_exists);
+
+  if (admin_status != SE05X_ESP_ADMIN_OK || !encryption_key_exists) {
+    ESP_LOGE(TAG, "Encryption key %08" PRIx32 " does not exist", key->id);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_object_allocate_handle(
+      &encryption_key, key->id, kSSS_KeyPart_Default, kSSS_CipherType_AES,
+      key->size / 8, kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate encryption key handle");
+    goto cleanup;
+  }
+
+  status = sss_aead_context_init(&aead_ctx, (sss_session_t *)&ctx->session.sss,
+                                 &encryption_key, kAlgorithm_SSS_AES_GCM_INT_IV,
+                                 kMode_SSS_Encrypt);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize AEAD context");
+    goto cleanup;
+  }
+  symmetric_init = true;
+
+  memset(nonce, 0, KM_AES_GCM_NONCE_LEN);
+
+  status = sss_aead_one_go(&aead_ctx, plaintext, encrypted, plaintext_len,
+                           nonce, KM_AES_GCM_NONCE_LEN, NULL, 0, tag, &tag_len);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not perform AES-GCM encryption");
+    goto cleanup;
+  }
+
+  if (tag_len != KM_AES_GCM_TAG_LEN) {
+    ESP_LOGE(TAG, "Unexpected AES-GCM tag length: %zu", tag_len);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  *ciphertext = blob;
+  *ciphertext_len = blob_len;
+
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (symmetric_init)
+    sss_aead_context_free(&aead_ctx);
+  if (encryption_key_init)
+    sss_key_object_free(&encryption_key);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t
+se_worker_decrypt_aes_gcm_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
+                               km_key_metadata_t *key, uint8_t *ciphertext,
+                               size_t ciphertext_len, uint8_t **plaintext,
+                               size_t *plaintext_len) {
+  if (pool == NULL || key == NULL || key->id == 0 || plaintext == NULL ||
+      plaintext_len == NULL || ciphertext == NULL || ciphertext_len == 0 ||
+      ciphertext_len <= KM_AES_GCM_OVERHEAD) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *plaintext = NULL;
+  *plaintext_len = 0;
+
+  sss_object_t decryption_key = {0};
+  sss_aead_t aead_ctx = {0};
+  bool decryption_key_init = false;
+  bool symmetric_init = false;
+
+  size_t encrypted_len = ciphertext_len - KM_AES_GCM_OVERHEAD;
+  uint8_t *nonce = ciphertext;
+  uint8_t *encrypted = ciphertext + KM_AES_GCM_NONCE_LEN;
+  uint8_t *tag = ciphertext + ciphertext_len - KM_AES_GCM_TAG_LEN;
+  uint8_t *out = km_memory_alloc(pool, encrypted_len);
+  size_t tag_len = KM_AES_GCM_TAG_LEN;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&decryption_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize decryption key handle");
+    goto cleanup;
+  }
+  decryption_key_init = true;
+
+  bool decryption_key_exists = false;
+  se05x_esp_admin_status_t admin_status = se05x_esp_admin_object_exists(
+      &ctx->session, key->id, &decryption_key_exists);
+
+  if (admin_status != SE05X_ESP_ADMIN_OK || !decryption_key_exists) {
+    ESP_LOGE(TAG, "Decryption key %08" PRIx32 " does not exist", key->id);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_object_allocate_handle(
+      &decryption_key, key->id, kSSS_KeyPart_Default, kSSS_CipherType_AES,
+      key->size / 8, kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate decryption key handle");
+    goto cleanup;
+  }
+
+  status = sss_aead_context_init(&aead_ctx, (sss_session_t *)&ctx->session.sss,
+                                 &decryption_key, kAlgorithm_SSS_AES_GCM,
+                                 kMode_SSS_Decrypt);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize AEAD context");
+    goto cleanup;
+  }
+  symmetric_init = true;
+
+  status = sss_aead_one_go(&aead_ctx, encrypted, out, encrypted_len, nonce,
+                           KM_AES_GCM_NONCE_LEN, NULL, 0, tag, &tag_len);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not perform AES-GCM decryption");
+    goto cleanup;
+  }
+
+  if (tag_len != KM_AES_GCM_TAG_LEN) {
+    ESP_LOGE(TAG, "Unexpected AES-GCM tag length: %zu", tag_len);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  *plaintext = out;
+  *plaintext_len = encrypted_len;
+
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (symmetric_init)
+    sss_aead_context_free(&aead_ctx);
+  if (decryption_key_init)
+    sss_key_object_free(&decryption_key);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
   case SE_REQUEST_GENERATE_AES:
+  case SE_REQUEST_ENCRYPT_AES_GCM:
+  case SE_REQUEST_DECRYPT_AES_GCM:
     return true;
   default:
     return false;
@@ -654,6 +846,22 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
     return se_worker_generate_aes_impl(ctx, request->args.generate_aes.hmac_id,
                                        request->args.generate_aes.bits,
                                        request->args.generate_aes.key_id);
+  case SE_REQUEST_ENCRYPT_AES_GCM:
+    return se_worker_encrypt_aes_gcm_impl(
+        ctx, request->args.encrypt_aes_gcm.pool,
+        request->args.encrypt_aes_gcm.key,
+        request->args.encrypt_aes_gcm.plaintext,
+        request->args.encrypt_aes_gcm.plaintext_len,
+        request->args.encrypt_aes_gcm.ciphertext,
+        request->args.encrypt_aes_gcm.ciphertext_len);
+  case SE_REQUEST_DECRYPT_AES_GCM:
+    return se_worker_decrypt_aes_gcm_impl(
+        ctx, request->args.decrypt_aes_gcm.pool,
+        request->args.decrypt_aes_gcm.key,
+        request->args.decrypt_aes_gcm.ciphertext,
+        request->args.decrypt_aes_gcm.ciphertext_len,
+        request->args.decrypt_aes_gcm.plaintext,
+        request->args.decrypt_aes_gcm.plaintext_len);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -849,6 +1057,59 @@ esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue generate aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_encrypt_aes_gcm(km_memory_pool_t *pool,
+                                       km_key_metadata_t *key,
+                                       uint8_t *plaintext, size_t plaintext_len,
+                                       uint8_t **ciphertext,
+                                       size_t *ciphertext_len) {
+  se_request_t request = {
+      .type = SE_REQUEST_ENCRYPT_AES_GCM,
+      .args.encrypt_aes_gcm = {.pool = pool,
+                               .key = key,
+                               .plaintext = plaintext,
+                               .plaintext_len = plaintext_len,
+                               .ciphertext = ciphertext,
+                               .ciphertext_len = ciphertext_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue encrypt aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t
+km_se_worker_decrypt_aes_gcm(km_memory_pool_t *pool, km_key_metadata_t *key,
+                             uint8_t *ciphertext, size_t ciphertext_len,
+                             uint8_t **plaintext, size_t *plaintext_len) {
+  se_request_t request = {
+      .type = SE_REQUEST_DECRYPT_AES_GCM,
+      .args.decrypt_aes_gcm = {.pool = pool,
+                               .key = key,
+                               .ciphertext = ciphertext,
+                               .ciphertext_len = ciphertext_len,
+                               .plaintext = plaintext,
+                               .plaintext_len = plaintext_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue decrypt aes request");
     return ESP_FAIL;
   }
 

@@ -2,6 +2,8 @@
 #define KEYMGR_TOKEN_H
 
 #include "esp_err.h"
+#include "key.h"
+#include "memory.h"
 #include "se05x_esp.h"
 #include "se_worker.h"
 #include <stdint.h>
@@ -56,8 +58,24 @@ esp_err_t km_token_authenticate(char *pin, size_t pin_length);
 /** get token and session status **/
 esp_err_t km_token_get_status(km_token_status_t *token_status);
 
+/** get key metadata by key id **/
+esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
+                                    km_key_metadata_t *out);
+
 /** generate AES key **/
 esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
                                 uint32_t *key_id);
+
+/** encrypt with AES key **/
+esp_err_t km_token_encrypt_aes_gcm(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *plaintext,
+                                   size_t plaintext_len, uint8_t **ciphertext,
+                                   size_t *ciphertext_len);
+
+/** decrypt with AES key **/
+esp_err_t km_token_decrypt_aes_gcm(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *ciphertext,
+                                   size_t ciphertext_len, uint8_t **plaintext,
+                                   size_t *plaintext_len);
 
 #endif // KEYMGR_TOKEN_H
