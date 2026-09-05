@@ -18,6 +18,7 @@ enum km_command_type {
   km_command_generate_key = 0x20,
   km_command_encrypt = 0x21,
   km_command_decrypt = 0x22,
+  km_command_sign = 0x23,
 };
 
 enum km_command_response_type {
@@ -27,6 +28,7 @@ enum km_command_response_type {
   km_command_response_generate_key = 0x20,
   km_command_response_encrypt = 0x21,
   km_command_response_decrypt = 0x22,
+  km_command_response_sign = 0x23,
   km_command_response_error = 0xFF,
 };
 

@@ -10,6 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Present in NXP's fsl_sss_se05x_apis.c, but omitted from the corresponding
+ * public header in this middleware release.
+ */
+sss_status_t sss_se05x_asymmetric_sign(
+    sss_se05x_asymmetric_t *context, const uint8_t *src_data,
+    size_t src_length, uint8_t *signature, size_t *signature_length);
+
 typedef struct {
   sss_session_t host_session;
   sss_key_store_t host_key_store;
@@ -245,6 +253,22 @@ sss_status_t se05x_esp_create_aes_auth_object(
       SE05X_ESP_AES_AUTH_KEY_SIZE, kSE05x_INS_AUTH_OBJECT,
       kSE05x_SymmKeyType_AES, 0);
   return sm_status == SM_OK ? kStatus_SSS_Success : kStatus_SSS_Fail;
+}
+
+sss_status_t se05x_esp_asymmetric_sign(sss_asymmetric_t *context,
+                                       const uint8_t *message,
+                                       size_t message_length,
+                                       uint8_t *signature,
+                                       size_t *signature_length) {
+  if (context == NULL || message == NULL || message_length == 0 ||
+      signature == NULL || signature_length == NULL ||
+      *signature_length == 0) {
+    return kStatus_SSS_InvalidArgument;
+  }
+
+  return sss_se05x_asymmetric_sign((sss_se05x_asymmetric_t *)context, message,
+                                   message_length, signature,
+                                   signature_length);
 }
 
 void se05x_esp_session_close(se05x_esp_session_t *session) {

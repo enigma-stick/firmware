@@ -895,6 +895,82 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t
+se_worker_sign_rsa_pss_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
+                            km_key_metadata_t *key, uint8_t *message,
+                            size_t message_len, uint8_t **signature,
+                            size_t *signature_len) {
+  if (key == NULL || signature == NULL || signature_len == NULL ||
+      message == NULL || message_len == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *signature = NULL;
+  *signature_len = 0;
+
+  sss_object_t rsa_key = {0};
+  sss_asymmetric_t sign_ctx = {0};
+  bool rsa_init = false;
+  bool ctx_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&rsa_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize signing key handle");
+    goto cleanup;
+  }
+  rsa_init = true;
+
+  status = sss_key_object_allocate_handle(&rsa_key, key->id, kSSS_KeyPart_Pair,
+                                          kSSS_CipherType_RSA, key->size / 8,
+                                          kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate signing key handle");
+    goto cleanup;
+  }
+
+  status = sss_asymmetric_context_init(
+      &sign_ctx, (sss_session_t *)&ctx->session.sss, &rsa_key,
+      kAlgorithm_SSS_RSASSA_PKCS1_PSS_MGF1_SHA256, kMode_SSS_Sign);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize signing context");
+    goto cleanup;
+  }
+  ctx_init = true;
+
+  size_t capacity = key->size / 8;
+  uint8_t *out = km_memory_alloc(pool, capacity);
+  if (out == NULL) {
+    ESP_LOGE(TAG, "Could not allocate RSA signature buffer");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  size_t written = capacity;
+  status =
+      se05x_esp_asymmetric_sign(&sign_ctx, message, message_len, out, &written);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to create RSA-PSS signature");
+    goto cleanup;
+  }
+
+  *signature = out;
+  *signature_len = written;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (ctx_init)
+    sss_asymmetric_context_free(&sign_ctx);
+  if (rsa_init)
+    sss_key_object_free(&rsa_key);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
@@ -902,6 +978,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_GENERATE_RSA:
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
+  case SE_REQUEST_SIGN_RSA_PSS:
     return true;
   default:
     return false;
@@ -959,6 +1036,13 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.decrypt_aes_gcm.ciphertext_len,
         request->args.decrypt_aes_gcm.plaintext,
         request->args.decrypt_aes_gcm.plaintext_len);
+  case SE_REQUEST_SIGN_RSA_PSS:
+    return se_worker_sign_rsa_pss_impl(
+        ctx, request->args.sign_rsa_pss.pool, request->args.sign_rsa_pss.key,
+        request->args.sign_rsa_pss.message,
+        request->args.sign_rsa_pss.message_len,
+        request->args.sign_rsa_pss.signature,
+        request->args.sign_rsa_pss.signature_len);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -1226,6 +1310,32 @@ km_se_worker_decrypt_aes_gcm(km_memory_pool_t *pool, km_key_metadata_t *key,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue decrypt aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_sign_rsa_pss(km_memory_pool_t *pool,
+                                    km_key_metadata_t *key, uint8_t *message,
+                                    size_t message_len, uint8_t **signature,
+                                    size_t *signature_len) {
+  se_request_t request = {
+      .type = SE_REQUEST_SIGN_RSA_PSS,
+      .args.sign_rsa_pss = {.pool = pool,
+                            .key = key,
+                            .message = message,
+                            .message_len = message_len,
+                            .signature = signature,
+                            .signature_len = signature_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue sign rsa request");
     return ESP_FAIL;
   }
 

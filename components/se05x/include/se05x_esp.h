@@ -65,4 +65,24 @@ void se05x_esp_session_close(se05x_esp_session_t *session);
 sss_status_t se05x_esp_get_info(se05x_esp_session_t *session,
                                 se05x_esp_info_t *info);
 
+/**
+ * Sign a message using an initialized SE05x asymmetric SSS context.
+ *
+ * NXP implements the message-signing operation for SE05x, but does not expose
+ * it through this middleware version's public SSS headers. This compatibility
+ * wrapper preserves the normal SSS context setup while keeping the unpublished
+ * vendor entry point out of application code.
+ *
+ * The default SSS asymmetric sign digest uses the RSA decrypt path. We
+ * provision signing keys with no ability to perform decryption operations.
+ *
+ * The caller supplies a signature buffer and sets signature_length to its
+ * capacity. On success, signature_length contains the number of bytes written.
+ */
+sss_status_t se05x_esp_asymmetric_sign(sss_asymmetric_t *context,
+                                       const uint8_t *message,
+                                       size_t message_length,
+                                       uint8_t *signature,
+                                       size_t *signature_length);
+
 #endif

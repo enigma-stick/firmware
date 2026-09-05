@@ -490,3 +490,17 @@ esp_err_t km_token_decrypt_aes_gcm(km_memory_pool_t *pool,
 
   return status;
 }
+
+esp_err_t km_token_sign_rsa_pss(km_memory_pool_t *pool, km_key_metadata_t *key,
+                                uint8_t *message, size_t message_len,
+                                uint8_t **signature, size_t *signature_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform sign before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_sign_rsa_pss(pool, key, message, message_len,
+                                               signature, signature_len);
+
+  return status;
+}

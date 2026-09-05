@@ -94,6 +94,29 @@ size_t km_command_response_decrypt_serialize(
     km_memory_pool_t *pool, const km_command_response_decrypt_t *response,
     uint8_t **out);
 
+// km_command_sign
+
+typedef struct {
+  uint32_t key_id;
+  uint8_t *message;
+  size_t message_len;
+} km_command_sign_t;
+
+bool km_command_sign_deserialize(km_memory_pool_t *pool, const uint8_t *payload,
+                                 size_t len, km_command_sign_t *out);
+
+// sign response
+
+typedef struct {
+  uint8_t *signature;
+  size_t signature_len;
+} km_command_response_sign_t;
+
+size_t
+km_command_response_sign_serialize(km_memory_pool_t *pool,
+                                   const km_command_response_sign_t *response,
+                                   uint8_t **out);
+
 // status response
 
 typedef struct {
