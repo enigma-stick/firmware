@@ -117,6 +117,28 @@ km_command_response_sign_serialize(km_memory_pool_t *pool,
                                    const km_command_response_sign_t *response,
                                    uint8_t **out);
 
+// km_command_get_key
+
+typedef struct {
+  uint32_t key_id;
+} km_command_get_key_t;
+
+bool km_command_get_key_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_get_key_t *out);
+
+// get key response
+
+typedef struct {
+  uint32_t encoding;
+  uint8_t *public_key;
+  uint32_t public_key_len;
+} km_command_response_get_key_t;
+
+size_t km_command_response_get_key_serialize(
+    km_memory_pool_t *pool, const km_command_response_get_key_t *response,
+    uint8_t **out);
+
 // status response
 
 typedef struct {

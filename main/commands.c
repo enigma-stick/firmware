@@ -212,6 +212,39 @@ km_command_response_sign_serialize(km_memory_pool_t *pool,
   return len;
 }
 
+bool km_command_get_key_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_get_key_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_get_key_t command;
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  if (!km_dz_u32(dz, &command.key_id)) {
+    return false;
+  }
+
+  *out = command;
+  return true;
+}
+
+size_t km_command_response_get_key_serialize(
+    km_memory_pool_t *pool, const km_command_response_get_key_t *response,
+    uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u32(sz, response->encoding);
+  km_sz_array(km_sz_u8, sz, response->public_key, response->public_key_len);
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
 static void km_command_handle_init(const km_frame_header_t *frame_header,
                                    const uint8_t *payload) {
   km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
@@ -531,6 +564,67 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_get_key(const km_frame_header_t *frame_header,
+                                      const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_get_key_t command;
+  if (!km_command_get_key_deserialize(pool, payload, frame_header->length,
+                                      &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_metadata_t key_meta;
+  esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
+  if (status != ESP_OK) {
+    km_usb_write_error("Could not retrieve key metadata");
+    goto cleanup;
+  }
+
+  switch (key_meta.type) {
+  case km_key_type_aes:
+    km_usb_write_error("Cannot get symmetric key material");
+    goto cleanup;
+  default:
+    break;
+  }
+
+  uint8_t *public_key;
+  size_t public_key_len;
+  status =
+      km_token_get_public_key(pool, &key_meta, &public_key, &public_key_len);
+
+  if (status == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "get public key failed: %s", esp_err_to_name(status));
+    km_usb_write_error("Get public key failed");
+    goto cleanup;
+  }
+
+  km_command_response_get_key_t response;
+  response.encoding =
+      km_public_key_encoding_der_spki; // TODO: this probably changes with EC
+  response.public_key = public_key;
+  response.public_key_len = public_key_len;
+  uint8_t *out;
+  size_t out_len = km_command_response_get_key_serialize(pool, &response, &out);
+
+  if (out_len == 0) {
+    km_usb_write_error("Could not serialize command response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_get_key, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
 void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
@@ -567,6 +661,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_sign:
     km_command_handle_sign(frame_header, payload);
+    break;
+  case km_command_get_key:
+    km_command_handle_get_key(frame_header, payload);
     break;
   default:
     km_usb_write_error("Invalid command");

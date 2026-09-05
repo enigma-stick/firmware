@@ -504,3 +504,15 @@ esp_err_t km_token_sign_rsa_pss(km_memory_pool_t *pool, km_key_metadata_t *key,
 
   return status;
 }
+
+esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
+                                  km_key_metadata_t *key, uint8_t **public_key,
+                                  size_t *public_key_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG,
+             "Cannot get public key material before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  return km_se_worker_get_public_key(pool, key, public_key, public_key_len);
+}

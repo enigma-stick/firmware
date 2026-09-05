@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define KM_FRAME_HEADER_SIZE 8
-#define KM_FRAME_PAYLOAD_MAX 512
+#define KM_FRAME_PAYLOAD_MAX 1024
 #define KM_FRAME_MAGIC 0x4B4D4752U
 #define KM_PROTOCOL_VERSION 0x01
 
@@ -19,6 +19,7 @@ enum km_command_type {
   km_command_encrypt = 0x21,
   km_command_decrypt = 0x22,
   km_command_sign = 0x23,
+  km_command_get_key = 0x30,
 };
 
 enum km_command_response_type {
@@ -29,6 +30,7 @@ enum km_command_response_type {
   km_command_response_encrypt = 0x21,
   km_command_response_decrypt = 0x22,
   km_command_response_sign = 0x23,
+  km_command_response_get_key = 0x30,
   km_command_response_error = 0xFF,
 };
 

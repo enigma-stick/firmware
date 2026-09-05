@@ -971,6 +971,65 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_get_public_key_impl(se_worker_context_t *ctx,
+                                               km_memory_pool_t *pool,
+                                               km_key_metadata_t *key,
+                                               uint8_t **public_key,
+                                               size_t *public_key_len) {
+  if (key == NULL || public_key == NULL || public_key_len == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *public_key = NULL;
+  *public_key_len = 0;
+
+  sss_object_t keypair = {0};
+  bool keypair_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not initialize key store");
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&keypair, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize keypair handle");
+    goto cleanup;
+  }
+  keypair_init = true;
+
+  status = sss_key_object_allocate_handle(&keypair, key->id, kSSS_KeyPart_Pair,
+                                          kSSS_CipherType_RSA, key->size / 8,
+                                          kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not allocate keypair handle");
+    goto cleanup;
+  }
+
+  size_t capacity = (key->size / 8) + 64;
+  uint8_t *der = km_memory_alloc(pool, capacity);
+  size_t der_len = capacity;
+  size_t ignored_key_bits = 0;
+
+  status = sss_key_store_get_key(&ctx->key_store, &keypair, der, &der_len,
+                                 &ignored_key_bits);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not retrieve public key material");
+    goto cleanup;
+  }
+
+  *public_key = der;
+  *public_key_len = der_len;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (keypair_init)
+    sss_key_object_free(&keypair);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
@@ -979,6 +1038,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
   case SE_REQUEST_SIGN_RSA_PSS:
+  case SE_REQUEST_GET_PUBLIC_KEY:
     return true;
   default:
     return false;
@@ -1043,6 +1103,12 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.sign_rsa_pss.message_len,
         request->args.sign_rsa_pss.signature,
         request->args.sign_rsa_pss.signature_len);
+  case SE_REQUEST_GET_PUBLIC_KEY:
+    return se_worker_get_public_key_impl(
+        ctx, request->args.get_public_key.pool,
+        request->args.get_public_key.key,
+        request->args.get_public_key.public_key,
+        request->args.get_public_key.public_key_len);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -1336,6 +1402,30 @@ esp_err_t km_se_worker_sign_rsa_pss(km_memory_pool_t *pool,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue sign rsa request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_get_public_key(km_memory_pool_t *pool,
+                                      km_key_metadata_t *key,
+                                      uint8_t **public_key,
+                                      size_t *public_key_len) {
+  se_request_t request = {
+      .type = SE_REQUEST_GET_PUBLIC_KEY,
+      .args.get_public_key = {.pool = pool,
+                              .key = key,
+                              .public_key = public_key,
+                              .public_key_len = public_key_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue get public key request");
     return ESP_FAIL;
   }
 

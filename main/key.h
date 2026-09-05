@@ -10,6 +10,10 @@ typedef enum {
   km_key_usage_sign = 0x02
 } km_key_usage_t;
 
+typedef enum {
+  km_public_key_encoding_der_spki = 0x01
+} km_public_key_encoding_t;
+
 typedef struct {
   uint32_t id;
   km_key_type_t type;

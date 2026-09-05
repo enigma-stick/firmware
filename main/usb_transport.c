@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define USB_BUFFER_SIZE 512
+#define USB_BUFFER_SIZE 1024
 
 static const char *TAG = "keymgr_usb";
 
@@ -75,5 +75,6 @@ static void km_usb_task_handler(void *ctx) {
 }
 
 void km_usb_start(km_app_context_t *ctx) {
-  xTaskCreate(km_usb_task_handler, "km_usb_task_handler", 4096, ctx, 10, NULL);
+  xTaskCreate(km_usb_task_handler, "km_usb_task_handler", 8 * 1024, ctx, 10,
+              NULL);
 }

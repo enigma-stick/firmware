@@ -87,4 +87,9 @@ esp_err_t km_token_sign_rsa_pss(km_memory_pool_t *pool, km_key_metadata_t *key,
                                 uint8_t *message, size_t message_len,
                                 uint8_t **signature, size_t *signature_len);
 
+/** get public key **/
+esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
+                                  km_key_metadata_t *key, uint8_t **public_key,
+                                  size_t *public_key_len);
+
 #endif // KEYMGR_TOKEN_H
