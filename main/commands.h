@@ -27,10 +27,9 @@ bool km_command_authenticate_deserialize(km_memory_pool_t *pool,
                                          km_command_authenticate_t *out);
 // km_command_generate_key
 
-typedef enum { km_generate_key_aes = 0x01 } km_generate_key_type_t;
-
 typedef struct {
-  km_generate_key_type_t type;
+  km_key_type_t type;
+  km_key_usage_t usage;
   uint16_t bits;
   char *label;
 } km_command_generate_key_t;

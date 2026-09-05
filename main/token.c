@@ -375,23 +375,30 @@ esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
   km_deserializer_t *dz = km_dz_init_move(pool, data, len);
 
   uint32_t type;
-  if (!km_dz_u32(dz, &type) || !km_dz_u16(dz, &out->size) ||
-      !km_dz_str(pool, dz, &out->label)) {
+  uint32_t usage;
+  if (!km_dz_u32(dz, &type) || !km_dz_u32(dz, &usage) ||
+      !km_dz_u16(dz, &out->size) || !km_dz_str(pool, dz, &out->label)) {
     ESP_LOGE(TAG, "Could not deserialize key metadata from NVS");
     return ESP_FAIL;
   }
   out->type = (km_key_type_t)type;
+  out->usage = (km_key_usage_t)usage;
   out->id = key_id;
 
   return ESP_OK;
 }
 
-esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
-                                uint32_t *key_id) {
+esp_err_t km_token_generate_aes(uint16_t bits, km_key_usage_t usage,
+                                const char *label, uint32_t *key_id) {
 
   if (!token_metadata_loaded) {
     ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
     return ESP_ERR_INVALID_STATE;
+  }
+
+  if (usage != km_key_usage_encrypt) {
+    ESP_LOGE(TAG, "Invalid key usage for AES key");
+    return ESP_ERR_INVALID_ARG;
   }
 
   esp_err_t status =
@@ -406,6 +413,42 @@ esp_err_t km_token_generate_aes(uint16_t bits, const char *label,
 
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
   km_sz_u32(sz, km_key_type_aes);
+  km_sz_u32(sz, usage);
+  km_sz_u16(sz, bits);
+  km_sz_str(sz, label);
+
+  if (!km_store_write(name, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not save key metadata to NVS");
+    status = ESP_FAIL;
+  }
+
+  km_sz_free(sz);
+  return status;
+}
+
+esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
+                                const char *label, uint32_t *key_id) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (usage != km_key_usage_encrypt && usage != km_key_usage_sign) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t status = km_se_worker_generate_rsa(bits, usage, key_id);
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "Could not generate RSA key");
+    return status;
+  }
+
+  char name[15] = {0};
+  snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
+
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u32(sz, km_key_type_rsa);
+  km_sz_u32(sz, usage);
   km_sz_u16(sz, bits);
   km_sz_str(sz, label);
 

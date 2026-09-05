@@ -28,6 +28,7 @@ typedef enum {
   SE_REQUEST_CLOSE_SESSION,
   SE_REQUEST_GET_SESSION_STATE,
   SE_REQUEST_GENERATE_AES,
+  SE_REQUEST_GENERATE_RSA,
   SE_REQUEST_ENCRYPT_AES_GCM,
   SE_REQUEST_DECRYPT_AES_GCM
 } se_request_type_t;
@@ -69,6 +70,12 @@ typedef struct _request_t {
       uint16_t bits;
       uint32_t *key_id;
     } generate_aes;
+
+    struct {
+      uint16_t bits;
+      km_key_usage_t usage;
+      uint32_t *key_id;
+    } generate_rsa;
 
     struct {
       km_memory_pool_t *pool;
@@ -114,6 +121,8 @@ esp_err_t km_se_worker_open_session(uint32_t object_id,
 esp_err_t km_se_worker_close_session(void);
 esp_err_t km_se_worker_get_session_state(se_worker_session_state_t *state);
 esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
+                                    uint32_t *key_id);
+esp_err_t km_se_worker_generate_rsa(uint16_t bits, km_key_usage_t usage,
                                     uint32_t *key_id);
 esp_err_t km_se_worker_encrypt_aes_gcm(km_memory_pool_t *pool,
                                        km_key_metadata_t *key,

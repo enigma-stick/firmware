@@ -4,6 +4,7 @@
 #include "freertos/idf_additions.h"
 #include "fsl_sss_api.h"
 #include "fsl_sss_user_apis.h"
+#include "key.h"
 #include "se05x_esp.h"
 #include "se05x_esp_admin.h"
 #include "token.h"
@@ -618,6 +619,97 @@ cleanup:
   return esp_status;
 }
 
+static esp_err_t se_worker_generate_rsa_impl(se_worker_context_t *ctx,
+                                             uint16_t bits,
+                                             km_key_usage_t usage,
+                                             uint32_t *key_id) {
+  if ((bits != 1024 && bits != 2048 && bits != 4096) || key_id == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *key_id = 0;
+
+  sss_object_t rsa_key = {0};
+  bool rsa_init = false;
+
+  if (!ctx->key_store_initialized) {
+    esp_err_t err = se_worker_init_keystore(ctx);
+    if (err != ESP_OK) {
+      return err;
+    }
+  }
+
+  uint32_t obj_id = KEYMGR_SE_APP_KEY_FIRST;
+  bool exists = false;
+  for (; obj_id <= KEYMGR_SE_APP_KEY_LAST; obj_id++) {
+    se05x_esp_admin_status_t result =
+        se05x_esp_admin_object_exists(&ctx->session, obj_id, &exists);
+
+    if (result != SE05X_ESP_ADMIN_OK) {
+      ESP_LOGE(TAG, "Could not determine if object exists during object scan");
+      return ESP_FAIL;
+    }
+
+    if (!exists) {
+      break;
+    }
+  }
+  if (exists) {
+    ESP_LOGE(TAG, "Could not find free object");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Destination key ID = %08" PRIx32, obj_id);
+
+  sss_status_t status = sss_key_object_init(&rsa_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize RSA key handle");
+    goto cleanup;
+  }
+  rsa_init = true;
+
+  status = sss_key_object_allocate_handle(&rsa_key, obj_id, kSSS_KeyPart_Pair,
+                                          kSSS_CipherType_RSA, bits / 8,
+                                          kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not allocate RSA key handle on secure element");
+    goto cleanup;
+  }
+
+  sss_policy_u common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {
+          .can_Write = 1, .can_Read = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u rsa_policy = {
+      .type = KPolicy_Asym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.asymmkey = {.can_Encrypt = usage == km_key_usage_encrypt ? 1 : 0,
+                          .can_Decrypt = usage == km_key_usage_encrypt ? 1 : 0,
+                          .can_Sign = usage == km_key_usage_sign ? 1 : 0,
+                          .can_Verify = usage == km_key_usage_sign ? 1 : 0}};
+
+  sss_policy_t policies = {.policies = {&common_policy, &rsa_policy},
+                           .nPolicies = 2};
+
+  status =
+      sss_key_store_generate_key(&ctx->key_store, &rsa_key, bits, &policies);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not generate RSA keypair on secure element");
+    goto cleanup;
+  }
+
+  *key_id = obj_id;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (rsa_init)
+    sss_key_object_free(&rsa_key);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t
 se_worker_encrypt_aes_gcm_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
                                km_key_metadata_t *key, uint8_t *plaintext,
@@ -807,6 +899,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
   case SE_REQUEST_GENERATE_AES:
+  case SE_REQUEST_GENERATE_RSA:
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
     return true;
@@ -846,6 +939,10 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
     return se_worker_generate_aes_impl(ctx, request->args.generate_aes.hmac_id,
                                        request->args.generate_aes.bits,
                                        request->args.generate_aes.key_id);
+  case SE_REQUEST_GENERATE_RSA:
+    return se_worker_generate_rsa_impl(ctx, request->args.generate_rsa.bits,
+                                       request->args.generate_rsa.usage,
+                                       request->args.generate_rsa.key_id);
   case SE_REQUEST_ENCRYPT_AES_GCM:
     return se_worker_encrypt_aes_gcm_impl(
         ctx, request->args.encrypt_aes_gcm.pool,
@@ -1057,6 +1154,25 @@ esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue generate aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_generate_rsa(uint16_t bits, km_key_usage_t usage,
+                                    uint32_t *key_id) {
+  se_request_t request = {
+      .type = SE_REQUEST_GENERATE_RSA,
+      .args.generate_rsa = {.bits = bits, .usage = usage, .key_id = key_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue generate rsa request");
     return ESP_FAIL;
   }
 

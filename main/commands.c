@@ -75,12 +75,15 @@ bool km_command_generate_key_deserialize(km_memory_pool_t *pool,
   km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
 
   uint32_t type;
-  if (!km_dz_u32(dz, &type) || !km_dz_u16(dz, &command.bits) ||
-      !km_dz_str(pool, dz, &command.label)) {
+  uint32_t usage;
+  if (!km_dz_u32(dz, &type) || !km_dz_u32(dz, &usage) ||
+      !km_dz_u16(dz, &command.bits) || !km_dz_str(pool, dz, &command.label)) {
     return false;
   }
 
-  command.type = (km_generate_key_type_t)type;
+  command.type = (km_key_type_t)type;
+  command.usage = (km_key_usage_t)usage;
+
   *out = command;
   return true;
 }
@@ -274,8 +277,13 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
   esp_err_t result;
   uint32_t key_id = 0;
   switch (command.type) {
-  case km_generate_key_aes:
-    result = km_token_generate_aes(command.bits, command.label, &key_id);
+  case km_key_type_aes:
+    result = km_token_generate_aes(command.bits, command.usage, command.label,
+                                   &key_id);
+    break;
+  case km_key_type_rsa:
+    result = km_token_generate_rsa(command.bits, command.usage, command.label,
+                                   &key_id);
     break;
   default:
     km_usb_write_error("Invalid key generation type");
@@ -288,7 +296,7 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
   }
 
   if (result != ESP_OK) {
-    km_usb_write_error("Could not generate AES key");
+    km_usb_write_error("Could not generate key");
     goto cleanup;
   }
 
