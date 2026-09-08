@@ -434,6 +434,7 @@ esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
   }
 
   if (usage != km_key_usage_encrypt && usage != km_key_usage_sign) {
+    ESP_LOGE(TAG, "Invalid key usage for RSA key");
     return ESP_ERR_INVALID_ARG;
   }
 
@@ -450,6 +451,42 @@ esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
   km_sz_u32(sz, km_key_type_rsa);
   km_sz_u32(sz, usage);
   km_sz_u16(sz, bits);
+  km_sz_str(sz, label);
+
+  if (!km_store_write(name, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not save key metadata to NVS");
+    status = ESP_FAIL;
+  }
+
+  km_sz_free(sz);
+  return status;
+}
+
+esp_err_t km_token_generate_ec(uint16_t size, km_key_usage_t usage,
+                               const char *label, uint32_t *key_id) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (usage != km_key_usage_sign && usage != km_key_usage_derive) {
+    ESP_LOGE(TAG, "Invalid key usage for EC key");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t status = km_se_worker_generate_ec(size, usage, key_id);
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "Could not generate EC key");
+    return status;
+  }
+
+  char name[15] = {0};
+  snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
+
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u32(sz, km_key_type_ec);
+  km_sz_u32(sz, usage);
+  km_sz_u16(sz, size);
   km_sz_str(sz, label);
 
   if (!km_store_write(name, sz->data, sz->len)) {
@@ -514,5 +551,18 @@ esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
     return ESP_ERR_INVALID_STATE;
   }
 
-  return km_se_worker_get_public_key(pool, key, public_key, public_key_len);
+  switch (key->type) {
+  case km_key_type_rsa:
+    return km_se_worker_get_public_key_rsa(pool, key, public_key,
+                                           public_key_len);
+  case km_key_type_ec:
+    return km_se_worker_get_public_key_ec(pool, key, public_key,
+                                          public_key_len);
+    break;
+  default:
+    ESP_LOGE(TAG, "Cannot export symmetric key material");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  return ESP_FAIL;
 }

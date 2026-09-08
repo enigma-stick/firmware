@@ -3,11 +3,16 @@
 
 #include <stdint.h>
 
-typedef enum { km_key_type_aes = 0x01, km_key_type_rsa = 0x02 } km_key_type_t;
+typedef enum {
+  km_key_type_aes = 0x01,
+  km_key_type_rsa = 0x02,
+  km_key_type_ec = 0x03
+} km_key_type_t;
 
 typedef enum {
   km_key_usage_encrypt = 0x01,
-  km_key_usage_sign = 0x02
+  km_key_usage_sign = 0x02,
+  km_key_usage_derive = 0x03,
 } km_key_usage_t;
 
 typedef enum {

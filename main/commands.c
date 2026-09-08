@@ -354,6 +354,10 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
     result = km_token_generate_rsa(command.bits, command.usage, command.label,
                                    &key_id);
     break;
+  case km_key_type_ec:
+    result = km_token_generate_ec(command.bits, command.usage, command.label,
+                                  &key_id);
+    break;
   default:
     km_usb_write_error("Invalid key generation type");
     goto cleanup;
@@ -607,8 +611,7 @@ static void km_command_handle_get_key(const km_frame_header_t *frame_header,
   }
 
   km_command_response_get_key_t response;
-  response.encoding =
-      km_public_key_encoding_der_spki; // TODO: this probably changes with EC
+  response.encoding = km_public_key_encoding_der_spki;
   response.public_key = public_key;
   response.public_key_len = public_key_len;
   uint8_t *out;

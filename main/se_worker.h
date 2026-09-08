@@ -29,10 +29,12 @@ typedef enum {
   SE_REQUEST_GET_SESSION_STATE,
   SE_REQUEST_GENERATE_AES,
   SE_REQUEST_GENERATE_RSA,
+  SE_REQUEST_GENERATE_EC,
   SE_REQUEST_ENCRYPT_AES_GCM,
   SE_REQUEST_DECRYPT_AES_GCM,
   SE_REQUEST_SIGN_RSA_PSS,
-  SE_REQUEST_GET_PUBLIC_KEY,
+  SE_REQUEST_GET_PUBLIC_KEY_RSA,
+  SE_REQUEST_GET_PUBLIC_KEY_EC,
 } se_request_type_t;
 
 typedef struct _request_t {
@@ -78,6 +80,12 @@ typedef struct _request_t {
       km_key_usage_t usage;
       uint32_t *key_id;
     } generate_rsa;
+
+    struct {
+      uint16_t size;
+      km_key_usage_t usage;
+      uint32_t *key_id;
+    } generate_ec;
 
     struct {
       km_memory_pool_t *pool;
@@ -142,6 +150,8 @@ esp_err_t km_se_worker_generate_aes(uint32_t hmac_id, uint16_t bits,
                                     uint32_t *key_id);
 esp_err_t km_se_worker_generate_rsa(uint16_t bits, km_key_usage_t usage,
                                     uint32_t *key_id);
+esp_err_t km_se_worker_generate_ec(uint16_t size, km_key_usage_t usage,
+                                   uint32_t *key_id);
 esp_err_t km_se_worker_encrypt_aes_gcm(km_memory_pool_t *pool,
                                        km_key_metadata_t *key,
                                        uint8_t *plaintext, size_t plaintext_len,
@@ -155,9 +165,13 @@ esp_err_t km_se_worker_sign_rsa_pss(km_memory_pool_t *pool,
                                     km_key_metadata_t *key, uint8_t *message,
                                     size_t message_len, uint8_t **signature,
                                     size_t *signature_len);
-esp_err_t km_se_worker_get_public_key(km_memory_pool_t *pool,
-                                      km_key_metadata_t *key,
-                                      uint8_t **public_key,
-                                      size_t *public_key_len);
+esp_err_t km_se_worker_get_public_key_rsa(km_memory_pool_t *pool,
+                                          km_key_metadata_t *key,
+                                          uint8_t **public_key,
+                                          size_t *public_key_len);
+esp_err_t km_se_worker_get_public_key_ec(km_memory_pool_t *pool,
+                                         km_key_metadata_t *key,
+                                         uint8_t **public_key,
+                                         size_t *public_key_len);
 
 #endif // KEYMGR_SE_WORKER_H

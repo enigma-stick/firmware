@@ -710,6 +710,92 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_generate_ec_impl(se_worker_context_t *ctx,
+                                            uint16_t size, km_key_usage_t usage,
+                                            uint32_t *key_id) {
+  if ((size != 256 && size != 384 && size != 521) || key_id == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  sss_object_t ec_key = {0};
+  bool ec_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not initialize key store");
+    return err;
+  }
+
+  uint32_t obj_id = KEYMGR_SE_APP_KEY_FIRST;
+  bool exists = false;
+  for (; obj_id <= KEYMGR_SE_APP_KEY_LAST; obj_id++) {
+    se05x_esp_admin_status_t result =
+        se05x_esp_admin_object_exists(&ctx->session, obj_id, &exists);
+
+    if (result != SE05X_ESP_ADMIN_OK) {
+      ESP_LOGE(TAG, "Could not determine if object exists during object scan");
+      return ESP_FAIL;
+    }
+
+    if (!exists) {
+      break;
+    }
+  }
+  if (exists) {
+    ESP_LOGE(TAG, "Could not find free object");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Destination key ID = %08" PRIx32, obj_id);
+
+  sss_status_t status = sss_key_object_init(&ec_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize key handle");
+    goto cleanup;
+  }
+  ec_init = true;
+
+  status = sss_key_object_allocate_handle(
+      &ec_key, obj_id, kSSS_KeyPart_Pair, kSSS_CipherType_EC_NIST_P,
+      (size + 7) / 8, kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate key handle");
+    goto cleanup;
+  }
+
+  sss_policy_u common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {
+          .can_Write = 1, .can_Read = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u ec_policy = {
+      .type = KPolicy_Asym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.asymmkey = {.can_KA = usage == km_key_usage_derive ? 1 : 0,
+                          .can_Sign = usage == km_key_usage_sign ? 1 : 0,
+                          .can_Verify = usage == km_key_usage_sign ? 1 : 0}};
+
+  sss_policy_t policies = {.policies = {&common_policy, &ec_policy},
+                           .nPolicies = 2};
+
+  status =
+      sss_key_store_generate_key(&ctx->key_store, &ec_key, size, &policies);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to generate EC key");
+    goto cleanup;
+  }
+
+  *key_id = obj_id;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (ec_init)
+    sss_key_object_free(&ec_key);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t
 se_worker_encrypt_aes_gcm_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
                                km_key_metadata_t *key, uint8_t *plaintext,
@@ -971,11 +1057,11 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
-static esp_err_t se_worker_get_public_key_impl(se_worker_context_t *ctx,
-                                               km_memory_pool_t *pool,
-                                               km_key_metadata_t *key,
-                                               uint8_t **public_key,
-                                               size_t *public_key_len) {
+static esp_err_t se_worker_get_public_key_rsa_impl(se_worker_context_t *ctx,
+                                                   km_memory_pool_t *pool,
+                                                   km_key_metadata_t *key,
+                                                   uint8_t **public_key,
+                                                   size_t *public_key_len) {
   if (key == NULL || public_key == NULL || public_key_len == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -1030,15 +1116,82 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_get_public_key_ec_impl(se_worker_context_t *ctx,
+                                                  km_memory_pool_t *pool,
+                                                  km_key_metadata_t *key,
+                                                  uint8_t **public_key,
+                                                  size_t *public_key_len) {
+  if (key == NULL || public_key == NULL || public_key_len == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *public_key = NULL;
+  *public_key_len = 0;
+
+  sss_object_t keypair = {0};
+  bool keypair_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not initialize key store");
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&keypair, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize keypair handle");
+    goto cleanup;
+  }
+  keypair_init = true;
+
+  // status = sss_key_object_allocate_handle(
+  //     &keypair, key->id, kSSS_KeyPart_Pair, kSSS_CipherType_EC_NIST_P,
+  //     (key->size / 8) + 7, kKeyObject_Mode_Persistent);
+  // if (status != kStatus_SSS_Success) {
+  //   ESP_LOGE(TAG, "Could not allocate keypair handle");
+  //   goto cleanup;
+  // }
+
+  status = sss_key_object_get_handle(&keypair, key->id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not get keypair handle");
+    goto cleanup;
+  }
+
+  size_t capacity = 256;
+  uint8_t *der = km_memory_alloc(pool, capacity);
+  size_t der_len = capacity;
+  size_t ignored_key_bits = 0;
+
+  status = sss_key_store_get_key(&ctx->key_store, &keypair, der, &der_len,
+                                 &ignored_key_bits);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not retrieve public key material");
+    goto cleanup;
+  }
+
+  *public_key = der;
+  *public_key_len = der_len;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (keypair_init)
+    sss_key_object_free(&keypair);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
   case SE_REQUEST_GENERATE_AES:
   case SE_REQUEST_GENERATE_RSA:
+  case SE_REQUEST_GENERATE_EC:
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
   case SE_REQUEST_SIGN_RSA_PSS:
-  case SE_REQUEST_GET_PUBLIC_KEY:
+  case SE_REQUEST_GET_PUBLIC_KEY_RSA:
+  case SE_REQUEST_GET_PUBLIC_KEY_EC:
     return true;
   default:
     return false;
@@ -1080,6 +1233,10 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
     return se_worker_generate_rsa_impl(ctx, request->args.generate_rsa.bits,
                                        request->args.generate_rsa.usage,
                                        request->args.generate_rsa.key_id);
+  case SE_REQUEST_GENERATE_EC:
+    return se_worker_generate_ec_impl(ctx, request->args.generate_ec.size,
+                                      request->args.generate_ec.usage,
+                                      request->args.generate_ec.key_id);
   case SE_REQUEST_ENCRYPT_AES_GCM:
     return se_worker_encrypt_aes_gcm_impl(
         ctx, request->args.encrypt_aes_gcm.pool,
@@ -1103,8 +1260,14 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.sign_rsa_pss.message_len,
         request->args.sign_rsa_pss.signature,
         request->args.sign_rsa_pss.signature_len);
-  case SE_REQUEST_GET_PUBLIC_KEY:
-    return se_worker_get_public_key_impl(
+  case SE_REQUEST_GET_PUBLIC_KEY_RSA:
+    return se_worker_get_public_key_rsa_impl(
+        ctx, request->args.get_public_key.pool,
+        request->args.get_public_key.key,
+        request->args.get_public_key.public_key,
+        request->args.get_public_key.public_key_len);
+  case SE_REQUEST_GET_PUBLIC_KEY_EC:
+    return se_worker_get_public_key_ec_impl(
         ctx, request->args.get_public_key.pool,
         request->args.get_public_key.key,
         request->args.get_public_key.public_key,
@@ -1330,6 +1493,25 @@ esp_err_t km_se_worker_generate_rsa(uint16_t bits, km_key_usage_t usage,
   return request.result;
 }
 
+esp_err_t km_se_worker_generate_ec(uint16_t size, km_key_usage_t usage,
+                                   uint32_t *key_id) {
+  se_request_t request = {
+      .type = SE_REQUEST_GENERATE_EC,
+      .args.generate_ec = {.size = size, .usage = usage, .key_id = key_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue generate ec request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
 esp_err_t km_se_worker_encrypt_aes_gcm(km_memory_pool_t *pool,
                                        km_key_metadata_t *key,
                                        uint8_t *plaintext, size_t plaintext_len,
@@ -1409,12 +1591,36 @@ esp_err_t km_se_worker_sign_rsa_pss(km_memory_pool_t *pool,
   return request.result;
 }
 
-esp_err_t km_se_worker_get_public_key(km_memory_pool_t *pool,
-                                      km_key_metadata_t *key,
-                                      uint8_t **public_key,
-                                      size_t *public_key_len) {
+esp_err_t km_se_worker_get_public_key_rsa(km_memory_pool_t *pool,
+                                          km_key_metadata_t *key,
+                                          uint8_t **public_key,
+                                          size_t *public_key_len) {
   se_request_t request = {
-      .type = SE_REQUEST_GET_PUBLIC_KEY,
+      .type = SE_REQUEST_GET_PUBLIC_KEY_RSA,
+      .args.get_public_key = {.pool = pool,
+                              .key = key,
+                              .public_key = public_key,
+                              .public_key_len = public_key_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue get public key request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_get_public_key_ec(km_memory_pool_t *pool,
+                                         km_key_metadata_t *key,
+                                         uint8_t **public_key,
+                                         size_t *public_key_len) {
+  se_request_t request = {
+      .type = SE_REQUEST_GET_PUBLIC_KEY_EC,
       .args.get_public_key = {.pool = pool,
                               .key = key,
                               .public_key = public_key,
