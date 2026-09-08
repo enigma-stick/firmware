@@ -5,6 +5,7 @@
 #include "fsl_sss_api.h"
 #include "fsl_sss_user_apis.h"
 #include "key.h"
+#include "memory.h"
 #include "psa/crypto_types.h"
 #include "se05x_esp.h"
 #include "se05x_esp_admin.h"
@@ -983,6 +984,79 @@ cleanup:
 }
 
 static esp_err_t
+se_worker_decrypt_rsa_oaep_impl(se_worker_context_t *ctx,
+                                km_memory_pool_t *pool, km_key_metadata_t *key,
+                                uint8_t *ciphertext, size_t ciphertext_len,
+                                uint8_t **plaintext, size_t *plaintext_len) {
+  if (pool == NULL || key == NULL || key->id == 0 || plaintext == NULL ||
+      plaintext_len == NULL || ciphertext == NULL || ciphertext_len == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *plaintext = NULL;
+  *plaintext_len = 0;
+
+  sss_object_t decryption_key = {0};
+  sss_asymmetric_t asym_ctx = {0};
+  bool decryption_key_init = false;
+  bool asymmetric_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&decryption_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize key handle");
+    goto cleanup;
+  }
+  decryption_key_init = true;
+
+  status = sss_key_object_get_handle(&decryption_key, key->id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not get key handle from secure element");
+    goto cleanup;
+  }
+
+  status = sss_asymmetric_context_init(
+      &asym_ctx, (sss_session_t *)&ctx->session.sss, &decryption_key,
+      kAlgorithm_SSS_RSAES_PKCS1_OAEP_SHA1, kMode_SSS_Decrypt);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize asymmetric context");
+    goto cleanup;
+  }
+  asymmetric_init = true;
+
+  size_t alloc = (key->size / 8);
+  uint8_t *out = km_memory_alloc(pool, alloc);
+  if (out == NULL) {
+    status = kStatus_SSS_Fail;
+    ESP_LOGE(TAG, "Could not allocate plaintext output");
+    goto cleanup;
+  }
+  size_t out_len = alloc;
+  status = sss_asymmetric_decrypt(&asym_ctx, ciphertext, ciphertext_len, out,
+                                  &out_len);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not perform RSA OAEP decryption");
+    goto cleanup;
+  }
+
+  *plaintext = out;
+  *plaintext_len = out_len;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (decryption_key_init)
+    sss_key_object_free(&decryption_key);
+  if (asymmetric_init)
+    sss_asymmetric_context_free(&asym_ctx);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t
 se_worker_sign_rsa_pss_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
                             km_key_metadata_t *key, uint8_t *message,
                             size_t message_len, uint8_t **signature,
@@ -1289,6 +1363,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_GENERATE_EC:
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
+  case SE_REQUEST_DECRYPT_RSA_OAEP:
   case SE_REQUEST_SIGN_RSA_PSS:
   case SE_REQUEST_SIGN_EC_ECDSA:
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
@@ -1348,12 +1423,14 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.encrypt_aes_gcm.ciphertext_len);
   case SE_REQUEST_DECRYPT_AES_GCM:
     return se_worker_decrypt_aes_gcm_impl(
-        ctx, request->args.decrypt_aes_gcm.pool,
-        request->args.decrypt_aes_gcm.key,
-        request->args.decrypt_aes_gcm.ciphertext,
-        request->args.decrypt_aes_gcm.ciphertext_len,
-        request->args.decrypt_aes_gcm.plaintext,
-        request->args.decrypt_aes_gcm.plaintext_len);
+        ctx, request->args.decrypt.pool, request->args.decrypt.key,
+        request->args.decrypt.ciphertext, request->args.decrypt.ciphertext_len,
+        request->args.decrypt.plaintext, request->args.decrypt.plaintext_len);
+  case SE_REQUEST_DECRYPT_RSA_OAEP:
+    return se_worker_decrypt_rsa_oaep_impl(
+        ctx, request->args.decrypt.pool, request->args.decrypt.key,
+        request->args.decrypt.ciphertext, request->args.decrypt.ciphertext_len,
+        request->args.decrypt.plaintext, request->args.decrypt.plaintext_len);
   case SE_REQUEST_SIGN_RSA_PSS:
     return se_worker_sign_rsa_pss_impl(
         ctx, request->args.sign.pool, request->args.sign.key,
@@ -1647,14 +1724,13 @@ esp_err_t
 km_se_worker_decrypt_aes_gcm(km_memory_pool_t *pool, km_key_metadata_t *key,
                              uint8_t *ciphertext, size_t ciphertext_len,
                              uint8_t **plaintext, size_t *plaintext_len) {
-  se_request_t request = {
-      .type = SE_REQUEST_DECRYPT_AES_GCM,
-      .args.decrypt_aes_gcm = {.pool = pool,
-                               .key = key,
-                               .ciphertext = ciphertext,
-                               .ciphertext_len = ciphertext_len,
-                               .plaintext = plaintext,
-                               .plaintext_len = plaintext_len}};
+  se_request_t request = {.type = SE_REQUEST_DECRYPT_AES_GCM,
+                          .args.decrypt = {.pool = pool,
+                                           .key = key,
+                                           .ciphertext = ciphertext,
+                                           .ciphertext_len = ciphertext_len,
+                                           .plaintext = plaintext,
+                                           .plaintext_len = plaintext_len}};
 
   request.completion =
       xSemaphoreCreateBinaryStatic(&request.completion_storage);
@@ -1662,6 +1738,31 @@ km_se_worker_decrypt_aes_gcm(km_memory_pool_t *pool, km_key_metadata_t *key,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue decrypt aes request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t
+km_se_worker_decrypt_rsa_oaep(km_memory_pool_t *pool, km_key_metadata_t *key,
+                              uint8_t *ciphertext, size_t ciphertext_len,
+                              uint8_t **plaintext, size_t *plaintext_len) {
+  se_request_t request = {.type = SE_REQUEST_DECRYPT_RSA_OAEP,
+                          .args.decrypt = {.pool = pool,
+                                           .key = key,
+                                           .ciphertext = ciphertext,
+                                           .ciphertext_len = ciphertext_len,
+                                           .plaintext = plaintext,
+                                           .plaintext_len = plaintext_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue decrypt rsa request");
     return ESP_FAIL;
   }
 

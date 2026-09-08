@@ -528,6 +528,20 @@ esp_err_t km_token_decrypt_aes_gcm(km_memory_pool_t *pool,
   return status;
 }
 
+esp_err_t km_token_decrypt_rsa_oaep(km_memory_pool_t *pool,
+                                    km_key_metadata_t *key, uint8_t *ciphertext,
+                                    size_t ciphertext_len, uint8_t **plaintext,
+                                    size_t *plaintext_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform decryption before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_decrypt_rsa_oaep(
+      pool, key, ciphertext, ciphertext_len, plaintext, plaintext_len);
+  return status;
+}
+
 esp_err_t km_token_sign_rsa_pss(km_memory_pool_t *pool, km_key_metadata_t *key,
                                 uint8_t *message, size_t message_len,
                                 uint8_t **signature, size_t *signature_len) {

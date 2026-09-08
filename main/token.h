@@ -86,6 +86,12 @@ esp_err_t km_token_decrypt_aes_gcm(km_memory_pool_t *pool,
                                    size_t ciphertext_len, uint8_t **plaintext,
                                    size_t *plaintext_len);
 
+/** decrypt with RSA key **/
+esp_err_t km_token_decrypt_rsa_oaep(km_memory_pool_t *pool,
+                                    km_key_metadata_t *key, uint8_t *ciphertext,
+                                    size_t ciphertext_len, uint8_t **plaintext,
+                                    size_t *plaintext_len);
+
 /** sign with RSA private key **/
 esp_err_t km_token_sign_rsa_pss(km_memory_pool_t *pool, km_key_metadata_t *key,
                                 uint8_t *message, size_t message_len,

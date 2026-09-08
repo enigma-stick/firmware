@@ -32,6 +32,7 @@ typedef enum {
   SE_REQUEST_GENERATE_EC,
   SE_REQUEST_ENCRYPT_AES_GCM,
   SE_REQUEST_DECRYPT_AES_GCM,
+  SE_REQUEST_DECRYPT_RSA_OAEP,
   SE_REQUEST_SIGN_RSA_PSS,
   SE_REQUEST_SIGN_EC_ECDSA,
   SE_REQUEST_GET_PUBLIC_KEY_RSA,
@@ -104,7 +105,7 @@ typedef struct _request_t {
       size_t ciphertext_len;
       uint8_t **plaintext;
       size_t *plaintext_len;
-    } decrypt_aes_gcm;
+    } decrypt;
 
     struct {
       km_memory_pool_t *pool;
@@ -162,6 +163,10 @@ esp_err_t
 km_se_worker_decrypt_aes_gcm(km_memory_pool_t *pool, km_key_metadata_t *key,
                              uint8_t *ciphertext, size_t ciphertext_len,
                              uint8_t **plaintext, size_t *plaintext_len);
+esp_err_t
+km_se_worker_decrypt_rsa_oaep(km_memory_pool_t *pool, km_key_metadata_t *key,
+                              uint8_t *ciphertext, size_t ciphertext_len,
+                              uint8_t **plaintext, size_t *plaintext_len);
 esp_err_t km_se_worker_sign_rsa_pss(km_memory_pool_t *pool,
                                     km_key_metadata_t *key, uint8_t *message,
                                     size_t message_len, uint8_t **signature,

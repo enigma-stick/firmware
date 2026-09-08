@@ -475,6 +475,11 @@ static void km_command_handle_decrypt(const km_frame_header_t *frame_header,
                                       command.ciphertext_len, &plaintext,
                                       &plaintext_len);
     break;
+  case km_key_type_rsa:
+    status = km_token_decrypt_rsa_oaep(pool, &key_meta, command.ciphertext,
+                                       command.ciphertext_len, &plaintext,
+                                       &plaintext_len);
+    break;
   default:
     km_usb_write_error("Unsupported key type for requsted operation");
     goto cleanup;
