@@ -535,6 +535,11 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
         km_token_sign_rsa_pss(pool, &key_meta, command.message,
                               command.message_len, &signature, &signature_len);
     break;
+  case km_key_type_ec:
+    status =
+        km_token_sign_ec_ecdsa(pool, &key_meta, command.message,
+                               command.message_len, &signature, &signature_len);
+    break;
   default:
     km_usb_write_error("Unsupported key type for requsted operation");
     goto cleanup;
