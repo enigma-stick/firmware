@@ -602,8 +602,8 @@ static bool is_key_entry(const char *name) {
 
 esp_err_t km_token_list_keys(km_memory_pool_t *pool, km_key_metadata_t **keys,
                              size_t *count, const km_key_type_t *key_type,
-                             const km_key_usage_t *key_usage,
-                             const char *label) {
+                             const km_key_usage_t *key_usage, const char *label,
+                             const uint32_t *key_id) {
   if (pool == NULL || keys == NULL || count == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -620,6 +620,21 @@ esp_err_t km_token_list_keys(km_memory_pool_t *pool, km_key_metadata_t **keys,
     err = ESP_ERR_NO_MEM;
     ESP_LOGE(TAG, "malloc failed");
     goto cleanup;
+  }
+
+  if (key_id != NULL) {
+    km_key_metadata_t key;
+    err = km_token_get_key_metadata(pool, *key_id, &key);
+    if (err != ESP_OK) {
+      ESP_LOGI(TAG, "Could not find key by that ID");
+      err = ESP_OK;
+      goto cleanup;
+    }
+
+    keys_found[key_count] = key;
+    key_count++;
+
+    goto finish;
   }
 
   char **entry_names;
@@ -680,6 +695,7 @@ esp_err_t km_token_list_keys(km_memory_pool_t *pool, km_key_metadata_t **keys,
   if (key_count == 0)
     goto cleanup;
 
+finish:
   km_key_metadata_t *result =
       km_memory_alloc(pool, key_count * sizeof(*result));
   memcpy(result, keys_found, key_count * sizeof(*result));

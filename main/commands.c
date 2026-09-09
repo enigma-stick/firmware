@@ -257,7 +257,8 @@ bool km_command_list_deserialize(km_memory_pool_t *pool, const uint8_t *payload,
   uint32_t type;
   uint32_t usage;
   if (!km_dz_u32(dz, &command.filter_flags) || !km_dz_u32(dz, &type) ||
-      !km_dz_u32(dz, &usage) || !km_dz_str(pool, dz, &command.key_label)) {
+      !km_dz_u32(dz, &usage) || !km_dz_str(pool, dz, &command.key_label) ||
+      !km_dz_u32(dz, &command.key_id)) {
     return false;
   }
 
@@ -699,6 +700,7 @@ static void km_command_handle_list(const km_frame_header_t *frame_header,
 
   km_key_type_t *key_type = NULL;
   km_key_usage_t *key_usage = NULL;
+  uint32_t *key_id = NULL;
   char *key_label = NULL;
 
   if (command.filter_flags & KEYMGR_LIST_FILTER_TYPE)
@@ -707,12 +709,14 @@ static void km_command_handle_list(const km_frame_header_t *frame_header,
     key_usage = &command.key_usage;
   if (command.filter_flags & KEYMGR_LIST_FILTER_LABEL)
     key_label = command.key_label;
+  if (command.filter_flags & KEYMGR_LIST_FILTER_ID)
+    key_id = &command.key_id;
 
   km_key_metadata_t *keys = NULL;
   size_t count = 0;
 
-  esp_err_t err =
-      km_token_list_keys(pool, &keys, &count, key_type, key_usage, key_label);
+  esp_err_t err = km_token_list_keys(pool, &keys, &count, key_type, key_usage,
+                                     key_label, key_id);
   if (err != ESP_OK) {
     km_usb_write_error("Error getting key list");
     goto cleanup;

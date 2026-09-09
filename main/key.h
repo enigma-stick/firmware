@@ -6,6 +6,7 @@
 #define KEYMGR_LIST_FILTER_LABEL (1 << 0)
 #define KEYMGR_LIST_FILTER_TYPE (1 << 1)
 #define KEYMGR_LIST_FILTER_USAGE (1 << 2)
+#define KEYMGR_LIST_FILTER_ID (1 << 3)
 
 typedef enum {
   km_key_type_aes = 0x01,

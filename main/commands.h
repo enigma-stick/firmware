@@ -147,6 +147,7 @@ typedef struct {
   km_key_type_t key_type;
   km_key_usage_t key_usage;
   char *key_label;
+  uint32_t key_id;
 } km_command_list_t;
 
 bool km_command_list_deserialize(km_memory_pool_t *pool, const uint8_t *payload,

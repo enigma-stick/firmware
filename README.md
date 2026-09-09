@@ -32,6 +32,6 @@ support for two status LEDs via GPIO which can be safely ignored if desired.
 - [ ] Key Management
   - [x] List provisioned keys
   - [x] Search by label/type/usage
-  - [ ] Fetch metadata by ID
+  - [x] Fetch metadata by ID
   - [ ] Support key deletion
 - [ ] Storage visibility
