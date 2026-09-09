@@ -434,6 +434,17 @@ static esp_err_t km_token_generate_ec(uint16_t size, km_key_usage_t usage,
   return km_se_worker_generate_ec(size, usage, key_id);
 }
 
+static esp_err_t km_token_generate_hmac(uint16_t size, km_key_usage_t usage,
+                                        uint32_t *key_id) {
+
+  if (usage != km_key_usage_sign) {
+    ESP_LOGE(TAG, "Invalid key usage for HMAC key");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  return km_se_worker_generate_hmac(token_metadata.se_hmac_id, size, usage, key_id);
+}
+
 esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
                                 km_key_usage_t usage, const char *label,
                                 uint32_t timestamp, uint32_t *key_id) {
@@ -458,6 +469,9 @@ esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
     break;
   case km_key_type_ec:
     status = km_token_generate_ec(bits, usage, key_id);
+    break;
+  case km_key_type_hmac:
+    status = km_token_generate_hmac(bits, usage, key_id);
     break;
   default:
     return ESP_ERR_INVALID_ARG;

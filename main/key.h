@@ -13,7 +13,8 @@
 typedef enum {
   km_key_type_aes = 0x01,
   km_key_type_rsa = 0x02,
-  km_key_type_ec = 0x03
+  km_key_type_ec = 0x03,
+  km_key_type_hmac = 0x04,
 } km_key_type_t;
 
 typedef enum {

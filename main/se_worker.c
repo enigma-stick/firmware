@@ -798,6 +798,168 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_generate_hmac_impl(se_worker_context_t *ctx,
+                                              uint32_t hmac_id, uint16_t size,
+                                              km_key_usage_t usage,
+                                              uint32_t *key_id) {
+  if (hmac_id == 0 || (size != 256 && size != 512) || key_id == NULL ||
+      usage != km_key_usage_sign) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *key_id = 0;
+
+  sss_object_t hmac_key = {0};
+  sss_object_t master = {0};
+  sss_derive_key_t derive = {0};
+  bool hmac_init = false;
+  bool master_init = false;
+  bool derive_init = false;
+  bool placeholder_created = false;
+  size_t key_bytes = size / 8;
+  uint8_t placeholder[64] = {0};
+  uint8_t salt[32] = {0};
+  const char *info = "keymgr/hmac/v1";
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not initialize key store");
+    return err;
+  }
+
+  uint32_t obj_id = KEYMGR_SE_APP_KEY_FIRST;
+  bool exists = false;
+  for (; obj_id <= KEYMGR_SE_APP_KEY_LAST; obj_id++) {
+    se05x_esp_admin_status_t result =
+        se05x_esp_admin_object_exists(&ctx->session, obj_id, &exists);
+
+    if (result != SE05X_ESP_ADMIN_OK) {
+      ESP_LOGE(TAG, "Could not determine if object exists during object scan");
+      return ESP_FAIL;
+    }
+
+    if (!exists) {
+      break;
+    }
+  }
+  if (exists) {
+    ESP_LOGE(TAG, "Could not find free object");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Destination key ID = %08" PRIx32, obj_id);
+
+  sss_status_t status = sss_key_object_init(&master, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize HMAC master handle");
+    goto cleanup;
+  }
+  master_init = true;
+
+  bool master_exists = false;
+  se05x_esp_admin_status_t admin_status =
+      se05x_esp_admin_object_exists(&ctx->session, hmac_id, &master_exists);
+  if (admin_status != SE05X_ESP_ADMIN_OK || !master_exists) {
+    ESP_LOGE(TAG, "Could not find HMAC master %08" PRIx32, hmac_id);
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_object_allocate_handle(
+      &master, hmac_id, kSSS_KeyPart_Default, kSSS_CipherType_HMAC, 32,
+      kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not configure HMAC master handle");
+    goto cleanup;
+  }
+
+  status = sss_key_object_init(&hmac_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize key handle");
+    goto cleanup;
+  }
+  hmac_init = true;
+
+  status = sss_key_object_allocate_handle(
+      &hmac_key, obj_id, kSSS_KeyPart_Default, kSSS_CipherType_HMAC, size / 8,
+      kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not allocate handle");
+    goto cleanup;
+  }
+
+  sss_policy_u common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {.can_Write = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u hmac_policy = {
+      .type = KPolicy_Sym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.symmkey = {.can_Sign = usage == km_key_usage_sign ? 1 : 0,
+                         .can_Verify = usage == km_key_usage_sign ? 1 : 0}};
+
+  sss_policy_t policies = {.policies = {&common_policy, &hmac_policy},
+                           .nPolicies = 2};
+
+  if (!km_crypto_rand(placeholder, key_bytes)) {
+    ESP_LOGE(TAG, "Could not generate HMAC destination placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_key_store_set_key(&ctx->key_store, &hmac_key, placeholder,
+                                 key_bytes, size, &policies, sizeof(policies));
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not create HMAC destination");
+    goto cleanup;
+  }
+  placeholder_created = true;
+  km_crypto_zero(placeholder, sizeof(placeholder));
+
+  status = sss_derive_key_context_init(
+      &derive, (sss_session_t *)&ctx->session.sss, &master,
+      kAlgorithm_SSS_SHA256, kMode_SSS_HKDF_ExtractExpand);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize HMAC derivation context");
+    goto cleanup;
+  }
+  derive_init = true;
+
+  if (!km_crypto_rand(salt, sizeof(salt))) {
+    ESP_LOGE(TAG, "Could not generate HMAC derivation salt");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_derive_key_one_go(&derive, salt, sizeof(salt), (uint8_t *)info,
+                                 strlen(info), &hmac_key, key_bytes);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not derive HMAC key from HMAC master");
+    goto cleanup;
+  }
+
+  *key_id = obj_id;
+  ctx->last_activity = xTaskGetTickCount();
+  ESP_LOGI(TAG, "Derived HMAC key %08" PRIx32 " (%u bits)", obj_id,
+           (unsigned)size);
+
+cleanup:
+  km_crypto_zero(placeholder, sizeof(placeholder));
+  if (status != kStatus_SSS_Success && placeholder_created) {
+    if (sss_key_store_erase_key(&ctx->key_store, &hmac_key) !=
+        kStatus_SSS_Success)
+      ESP_LOGE(TAG, "Could not clean up HMAC destination %08" PRIx32, obj_id);
+  }
+  if (derive_init)
+    sss_derive_key_context_free(&derive);
+  if (hmac_init)
+    sss_key_object_free(&hmac_key);
+  if (master_init)
+    sss_key_object_free(&master);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t
 se_worker_encrypt_aes_gcm_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
                                km_key_metadata_t *key, uint8_t *plaintext,
@@ -1416,6 +1578,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_GENERATE_AES:
   case SE_REQUEST_GENERATE_RSA:
   case SE_REQUEST_GENERATE_EC:
+  case SE_REQUEST_GENERATE_HMAC:
   case SE_REQUEST_ENCRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_AES_GCM:
   case SE_REQUEST_DECRYPT_RSA_OAEP:
@@ -1469,6 +1632,11 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
     return se_worker_generate_ec_impl(ctx, request->args.generate_ec.size,
                                       request->args.generate_ec.usage,
                                       request->args.generate_ec.key_id);
+  case SE_REQUEST_GENERATE_HMAC:
+    return se_worker_generate_hmac_impl(
+        ctx, request->args.generate_hmac.hmac_id,
+        request->args.generate_hmac.size, request->args.generate_hmac.usage,
+        request->args.generate_hmac.key_id);
   case SE_REQUEST_ENCRYPT_AES_GCM:
     return se_worker_encrypt_aes_gcm_impl(
         ctx, request->args.encrypt_aes_gcm.pool,
@@ -1744,6 +1912,26 @@ esp_err_t km_se_worker_generate_ec(uint16_t size, km_key_usage_t usage,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue generate ec request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_generate_hmac(uint32_t hmac_id, uint16_t size,
+                                     km_key_usage_t usage, uint32_t *key_id) {
+  se_request_t request = {
+      .type = SE_REQUEST_GENERATE_HMAC,
+      .args.generate_hmac = {
+          .hmac_id = hmac_id, .size = size, .usage = usage, .key_id = key_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue generate hmac request");
     return ESP_FAIL;
   }
 
