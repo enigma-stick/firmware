@@ -245,6 +245,54 @@ size_t km_command_response_get_key_serialize(
   return len;
 }
 
+bool km_command_list_deserialize(km_memory_pool_t *pool, const uint8_t *payload,
+                                 size_t len, km_command_list_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_list_t command = {0};
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  uint32_t type;
+  uint32_t usage;
+  if (!km_dz_u32(dz, &command.filter_flags) || !km_dz_u32(dz, &type) ||
+      !km_dz_u32(dz, &usage) || !km_dz_str(pool, dz, &command.key_label)) {
+    return false;
+  }
+
+  command.key_type = (km_key_type_t)type;
+  command.key_usage = (km_key_usage_t)usage;
+
+  *out = command;
+
+  return true;
+}
+
+size_t
+km_command_response_list_serialize(km_memory_pool_t *pool,
+                                   const km_command_response_list_t *response,
+                                   uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+
+  km_sz_u32(sz, response->count);
+  for (size_t i = 0; i < response->count; i++) {
+    km_key_metadata_t *key = &response->keys[i];
+    km_sz_u32(sz, key->id);
+    km_sz_u32(sz, key->type);
+    km_sz_u32(sz, key->usage);
+    km_sz_u16(sz, key->size);
+    km_sz_str(sz, key->label);
+  }
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
 static void km_command_handle_init(const km_frame_header_t *frame_header,
                                    const uint8_t *payload) {
   km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
@@ -638,6 +686,55 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_list(const km_frame_header_t *frame_header,
+                                   const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_list_t command;
+  if (!km_command_list_deserialize(pool, payload, frame_header->length,
+                                   &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_type_t *key_type = NULL;
+  km_key_usage_t *key_usage = NULL;
+  char *key_label = NULL;
+
+  if (command.filter_flags & KEYMGR_LIST_FILTER_TYPE)
+    key_type = &command.key_type;
+  if (command.filter_flags & KEYMGR_LIST_FILTER_USAGE)
+    key_usage = &command.key_usage;
+  if (command.filter_flags & KEYMGR_LIST_FILTER_LABEL)
+    key_label = command.key_label;
+
+  km_key_metadata_t *keys = NULL;
+  size_t count = 0;
+
+  esp_err_t err =
+      km_token_list_keys(pool, &keys, &count, key_type, key_usage, key_label);
+  if (err != ESP_OK) {
+    km_usb_write_error("Error getting key list");
+    goto cleanup;
+  }
+
+  km_command_response_list_t response;
+  response.count = count;
+  response.keys = keys;
+
+  uint8_t *out;
+  size_t out_len = km_command_response_list_serialize(pool, &response, &out);
+  if (out_len == 0) {
+    km_usb_write_error("Could not serialize response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_list, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
 void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
@@ -677,6 +774,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_get_key:
     km_command_handle_get_key(frame_header, payload);
+    break;
+  case km_command_list:
+    km_command_handle_list(frame_header, payload);
     break;
   default:
     km_usb_write_error("Invalid command");

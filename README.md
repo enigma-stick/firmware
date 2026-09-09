@@ -25,13 +25,13 @@ support for two status LEDs via GPIO which can be safely ignored if desired.
 
 ## Roadmap
 
-- [ ] RSA OAEP decryption
+- [x] RSA OAEP decryption
 - [ ] ECDH + HKDF
 - [ ] HMAC keys
 - [ ] Dev cleanup script
 - [ ] Key Management
-  - [ ] List provisioned keys
-  - [ ] Search by label/type/usage
+  - [x] List provisioned keys
+  - [x] Search by label/type/usage
   - [ ] Fetch metadata by ID
   - [ ] Support key deletion
 - [ ] Storage visibility

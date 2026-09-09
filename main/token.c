@@ -2,6 +2,7 @@
 
 #include "crypto.h"
 #include "esp_log.h"
+#include "key.h"
 #include "nvs.h"
 #include "se_worker.h"
 #include "serial.h"
@@ -592,4 +593,101 @@ esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
   }
 
   return ESP_FAIL;
+}
+
+static bool is_key_entry(const char *name) {
+  return strlen(name) == 11 && strncmp(name, "km:", 3) == 0 &&
+         strspn(name + 3, "0123456789abcdefABCDEF") == 8;
+}
+
+esp_err_t km_token_list_keys(km_memory_pool_t *pool, km_key_metadata_t **keys,
+                             size_t *count, const km_key_type_t *key_type,
+                             const km_key_usage_t *key_usage,
+                             const char *label) {
+  if (pool == NULL || keys == NULL || count == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *keys = NULL;
+  *count = 0;
+
+  esp_err_t err = ESP_OK;
+  size_t key_capacity = 1;
+  size_t key_count = 0;
+  km_key_metadata_t *keys_found =
+      malloc(sizeof(km_key_metadata_t) * key_capacity);
+  if (keys_found == NULL) {
+    err = ESP_ERR_NO_MEM;
+    ESP_LOGE(TAG, "malloc failed");
+    goto cleanup;
+  }
+
+  char **entry_names;
+  size_t entry_count = 0;
+  err = km_store_get_entries(pool, &entry_names, &entry_count);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not get NVS entry labels");
+    goto cleanup;
+  }
+
+  if (entry_count == 0) {
+    ESP_LOGI(TAG, "Empty enumeration. Returning successfully.");
+    goto cleanup;
+  }
+
+  for (size_t i = 0; i < entry_count; i++) {
+    char *entry_name = entry_names[i];
+    if (!is_key_entry(entry_name)) {
+      continue;
+    }
+
+    uint32_t id = (uint32_t)strtoul(entry_name + 3, NULL, 16);
+    km_key_metadata_t key = {0};
+    err = km_token_get_key_metadata(pool, id, &key);
+    if (err != ESP_OK) {
+      // TODO: fix this; we have dead records
+      ESP_LOGE(TAG, "Could not get key metadata for given key ID: %08" PRIx32,
+               id);
+      err = ESP_OK;
+      continue;
+      // goto cleanup;
+    }
+
+    if (key_type != NULL && key.type != *key_type)
+      continue;
+    if (key_usage != NULL && key.usage != *key_usage)
+      continue;
+    if (label != NULL && strcmp(key.label, label) != 0)
+      continue;
+
+    if (key_count == key_capacity) {
+      size_t new_capacity = key_capacity * 2;
+      km_key_metadata_t *grown =
+          realloc(keys_found, sizeof(km_key_metadata_t) * new_capacity);
+      if (grown == NULL) {
+        err = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "realloc failed");
+        goto cleanup;
+      }
+      keys_found = grown;
+      key_capacity = new_capacity;
+    }
+
+    keys_found[key_count] = key;
+    key_count++;
+  }
+
+  if (key_count == 0)
+    goto cleanup;
+
+  km_key_metadata_t *result =
+      km_memory_alloc(pool, key_count * sizeof(*result));
+  memcpy(result, keys_found, key_count * sizeof(*result));
+
+  *keys = result;
+  *count = key_count;
+
+cleanup:
+  free(keys_found);
+  return err;
 }

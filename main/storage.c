@@ -5,6 +5,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include <stdlib.h>
+#include <strings.h>
 
 static const char *NAMESPACE = "keymgr";
 static const char *TAG = "keymgr_store";
@@ -109,4 +110,99 @@ bool km_store_write(const char *key, const void *value, size_t len) {
 
   nvs_close(handle);
   return true;
+}
+
+esp_err_t km_store_get_entries(km_memory_pool_t *pool, char ***labels,
+                               size_t *count) {
+  if (pool == NULL || labels == NULL || count == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle = {0};
+  nvs_iterator_t iter = {0};
+  bool iter_open = false;
+  bool label_alloc = false;
+
+  *labels = NULL;
+  *count = 0;
+
+  esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "entries: could not open nvs handle");
+    return err;
+  }
+
+  err = nvs_entry_find_in_handle(handle, NVS_TYPE_BLOB, &iter);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK;
+    goto cleanup;
+  }
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "entries: could not find in handle");
+    goto cleanup;
+  }
+  iter_open = true;
+
+  nvs_entry_info_t info = {0};
+  size_t label_capacity = 1;
+  size_t label_count = 0;
+  char **found_labels = malloc(sizeof(char *) * label_capacity);
+  if (found_labels == NULL) {
+    err = ESP_ERR_NO_MEM;
+    ESP_LOGE(TAG, "malloc failed");
+    goto cleanup;
+  }
+  label_alloc = true;
+
+  while (err == ESP_OK) {
+    err = nvs_entry_info(iter, &info);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "entries: error getting entry info");
+      goto cleanup;
+    }
+
+    size_t this_label_len = strlen(info.key);
+    char *this_label = km_memory_alloc(pool, sizeof(char) * this_label_len + 1);
+    memcpy(this_label, info.key, this_label_len);
+    this_label[this_label_len] = '\0';
+
+    if (label_count == label_capacity) {
+      size_t new_capacity = label_capacity * 2;
+      char **grown = realloc(found_labels, sizeof(char *) * new_capacity);
+      if (grown == NULL) {
+        err = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "realloc failed");
+        goto cleanup;
+      }
+      found_labels = grown;
+      label_capacity = new_capacity;
+    }
+
+    found_labels[label_count] = this_label;
+    label_count++;
+
+    err = nvs_entry_next(&iter);
+  }
+
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK;
+  } else {
+    ESP_LOGE(TAG, "Invalid error code from NVS entry loop");
+    goto cleanup;
+  }
+
+  char **result = km_memory_alloc(pool, label_count * sizeof(*result));
+  memcpy(result, found_labels, label_count * sizeof(*result));
+
+  *labels = result;
+  *count = label_count;
+
+cleanup:
+  nvs_close(handle);
+  if (iter_open)
+    nvs_release_iterator(iter);
+  if (label_alloc)
+    free(found_labels);
+
+  return err;
 }

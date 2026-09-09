@@ -2,6 +2,7 @@
 #define KEYMGR_COMMANDS_H
 
 #include "app.h"
+#include "key.h"
 #include "memory.h"
 #include "protocol.h"
 #include "se_worker.h"
@@ -138,6 +139,30 @@ typedef struct {
 size_t km_command_response_get_key_serialize(
     km_memory_pool_t *pool, const km_command_response_get_key_t *response,
     uint8_t **out);
+
+// km_command_list
+
+typedef struct {
+  uint32_t filter_flags;
+  km_key_type_t key_type;
+  km_key_usage_t key_usage;
+  char *key_label;
+} km_command_list_t;
+
+bool km_command_list_deserialize(km_memory_pool_t *pool, const uint8_t *payload,
+                                 size_t len, km_command_list_t *out);
+
+// list response
+
+typedef struct {
+  uint32_t count;
+  km_key_metadata_t *keys;
+} km_command_response_list_t;
+
+size_t
+km_command_response_list_serialize(km_memory_pool_t *pool,
+                                   const km_command_response_list_t *response,
+                                   uint8_t **out);
 
 // status response
 

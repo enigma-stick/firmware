@@ -107,4 +107,10 @@ esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
                                   km_key_metadata_t *key, uint8_t **public_key,
                                   size_t *public_key_len);
 
+/** list keys **/
+esp_err_t km_token_list_keys(km_memory_pool_t *pool, km_key_metadata_t **keys,
+                             size_t *count, const km_key_type_t *key_type,
+                             const km_key_usage_t *key_usage,
+                             const char *label);
+
 #endif // KEYMGR_TOKEN_H
