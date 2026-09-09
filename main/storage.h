@@ -13,5 +13,6 @@ void *km_store_read(km_memory_pool_t *pool, const char *key, size_t *len);
 bool km_store_write(const char *key, const void *value, size_t len);
 esp_err_t km_store_get_entries(km_memory_pool_t *pool, char ***labels,
                                size_t *count);
+esp_err_t km_store_delete(const char *key);
 
 #endif // KEYMGR_STORAGE_H

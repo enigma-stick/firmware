@@ -21,6 +21,7 @@ enum km_command_type {
   km_command_sign = 0x23,
   km_command_get_key = 0x30,
   km_command_list = 0x40,
+  km_command_destroy = 0x41,
 };
 
 enum km_command_response_type {

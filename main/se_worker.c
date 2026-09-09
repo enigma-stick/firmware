@@ -1355,6 +1355,61 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_destroy_key_impl(se_worker_context_t *ctx,
+                                            uint32_t key_id) {
+  if (key_id < KEYMGR_SE_APP_KEY_FIRST || key_id > KEYMGR_SE_APP_KEY_LAST) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  sss_object_t object = {0};
+  bool object_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not initialize key store");
+    return err;
+  }
+
+  bool exists = false;
+  se05x_esp_admin_status_t result =
+      se05x_esp_admin_object_exists(&ctx->session, key_id, &exists);
+  if (result != SE05X_ESP_ADMIN_OK) {
+    ESP_LOGE(TAG, "Could not determine if key exists in SE");
+    return ESP_FAIL;
+  }
+  if (!exists) {
+    ESP_LOGI(TAG, "Key does not exist in SE");
+    return ESP_OK;
+  }
+
+  sss_status_t status = sss_key_object_init(&object, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize key handle");
+    goto cleanup;
+  }
+  object_init = true;
+
+  status = sss_key_object_get_handle(&object, key_id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not get key handle");
+    goto cleanup;
+  }
+
+  status = sss_key_store_erase_key(&ctx->key_store, &object);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not erase key handle");
+    goto cleanup;
+  }
+
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (object_init)
+    sss_key_object_free(&object);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static bool se_request_requires_auth(se_request_type_t type) {
   switch (type) {
   case SE_REQUEST_PROVISION_HMAC_MASTER:
@@ -1368,6 +1423,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_SIGN_EC_ECDSA:
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
   case SE_REQUEST_GET_PUBLIC_KEY_EC:
+  case SE_REQUEST_DESTROY_KEY:
     return true;
   default:
     return false;
@@ -1453,6 +1509,8 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.get_public_key.key,
         request->args.get_public_key.public_key,
         request->args.get_public_key.public_key_len);
+  case SE_REQUEST_DESTROY_KEY:
+    return se_worker_destroy_key_impl(ctx, request->args.destroy_key.key_id);
   default:
     ESP_LOGE(TAG, "Unsupported SE worker request: %u", (unsigned)request->type);
     return ESP_ERR_NOT_SUPPORTED;
@@ -1861,6 +1919,23 @@ esp_err_t km_se_worker_get_public_key_ec(km_memory_pool_t *pool,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue get public key request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_destroy_key(uint32_t key_id) {
+  se_request_t request = {.type = SE_REQUEST_DESTROY_KEY,
+                          .args.destroy_key = {.key_id = key_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue destroy key request");
     return ESP_FAIL;
   }
 

@@ -206,3 +206,33 @@ cleanup:
 
   return err;
 }
+
+esp_err_t km_store_delete(const char *key) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "delete: Could not open NVS handle");
+    return err;
+  }
+
+  err = nvs_erase_key(handle, key);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "delete: Key meta does not exist; returning early");
+    err = ESP_OK;
+    goto cleanup;
+  }
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "delete: Could not erase key");
+    goto cleanup;
+  }
+
+  err = nvs_commit(handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "delete: Could not commit key erasure");
+    goto cleanup;
+  }
+
+cleanup:
+  nvs_close(handle);
+  return err;
+}

@@ -294,6 +294,24 @@ km_command_response_list_serialize(km_memory_pool_t *pool,
   return len;
 }
 
+bool km_command_destroy_deserialize(km_memory_pool_t *pool,
+                                    const uint8_t *payload, size_t len,
+                                    km_command_destroy_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+  km_command_destroy_t command;
+
+  if (!km_dz_u32(dz, &command.key_id)) {
+    return false;
+  }
+
+  *out = command;
+  return true;
+}
+
 static void km_command_handle_init(const km_frame_header_t *frame_header,
                                    const uint8_t *payload) {
   km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
@@ -739,6 +757,33 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_destroy(const km_frame_header_t *frame_header,
+                                      const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_destroy_t command;
+  if (!km_command_destroy_deserialize(pool, payload, frame_header->length,
+                                      &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  esp_err_t err = km_token_destroy_key(command.key_id);
+  if (err == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+  if (err != ESP_OK) {
+    km_usb_write_error("Could not destroy key");
+    goto cleanup;
+  }
+
+  km_usb_write_success();
+
+cleanup:
+  km_memory_free(pool);
+}
+
 void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
@@ -781,6 +826,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_list:
     km_command_handle_list(frame_header, payload);
+    break;
+  case km_command_destroy:
+    km_command_handle_destroy(frame_header, payload);
     break;
   default:
     km_usb_write_error("Invalid command");

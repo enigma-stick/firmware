@@ -28,10 +28,10 @@ support for two status LEDs via GPIO which can be safely ignored if desired.
 - [x] RSA OAEP decryption
 - [ ] ECDH + HKDF
 - [ ] HMAC keys
-- [ ] Dev cleanup script
-- [ ] Key Management
+- [x] Key Management
   - [x] List provisioned keys
   - [x] Search by label/type/usage
   - [x] Fetch metadata by ID
-  - [ ] Support key deletion
+  - [x] Support key deletion
 - [ ] Storage visibility
+- [ ] Dev cleanup script

@@ -37,6 +37,7 @@ typedef enum {
   SE_REQUEST_SIGN_EC_ECDSA,
   SE_REQUEST_GET_PUBLIC_KEY_RSA,
   SE_REQUEST_GET_PUBLIC_KEY_EC,
+  SE_REQUEST_DESTROY_KEY
 } se_request_type_t;
 
 typedef struct _request_t {
@@ -122,6 +123,10 @@ typedef struct _request_t {
       uint8_t **public_key;
       size_t *public_key_len;
     } get_public_key;
+
+    struct {
+      uint32_t key_id;
+    } destroy_key;
   } args;
 } se_request_t;
 
@@ -183,5 +188,6 @@ esp_err_t km_se_worker_get_public_key_ec(km_memory_pool_t *pool,
                                          km_key_metadata_t *key,
                                          uint8_t **public_key,
                                          size_t *public_key_len);
+esp_err_t km_se_worker_destroy_key(uint32_t key_id);
 
 #endif // KEYMGR_SE_WORKER_H

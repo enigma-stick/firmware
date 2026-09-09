@@ -707,3 +707,22 @@ cleanup:
   free(keys_found);
   return err;
 }
+
+esp_err_t km_token_destroy_key(uint32_t key_id) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot destroy key if metadata is not loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t err = km_se_worker_destroy_key(key_id);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Could not destroy key material");
+    return err;
+  }
+
+  char name[15] = {0};
+  snprintf(name, sizeof(name), "km:%08" PRIx32, key_id);
+  err = km_store_delete(name);
+
+  return err;
+}
