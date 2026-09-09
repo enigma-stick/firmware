@@ -77,7 +77,8 @@ bool km_command_generate_key_deserialize(km_memory_pool_t *pool,
   uint32_t type;
   uint32_t usage;
   if (!km_dz_u32(dz, &type) || !km_dz_u32(dz, &usage) ||
-      !km_dz_u16(dz, &command.bits) || !km_dz_str(pool, dz, &command.label)) {
+      !km_dz_u16(dz, &command.bits) || !km_dz_str(pool, dz, &command.label) ||
+      !km_dz_u32(dz, &command.timestamp)) {
     return false;
   }
 
@@ -284,6 +285,7 @@ km_command_response_list_serialize(km_memory_pool_t *pool,
     km_sz_u32(sz, key->usage);
     km_sz_u16(sz, key->size);
     km_sz_str(sz, key->label);
+    km_sz_u32(sz, key->created_at);
   }
 
   size_t len = sz->len;
@@ -410,26 +412,10 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
     goto cleanup;
   }
 
-  esp_err_t result;
   uint32_t key_id = 0;
-  switch (command.type) {
-  case km_key_type_aes:
-    result = km_token_generate_aes(command.bits, command.usage, command.label,
-                                   &key_id);
-    break;
-  case km_key_type_rsa:
-    result = km_token_generate_rsa(command.bits, command.usage, command.label,
-                                   &key_id);
-    break;
-  case km_key_type_ec:
-    result = km_token_generate_ec(command.bits, command.usage, command.label,
-                                  &key_id);
-    break;
-  default:
-    km_usb_write_error("Invalid key generation type");
-    goto cleanup;
-  }
-
+  esp_err_t result =
+      km_token_generate_key(command.type, command.bits, command.usage,
+                            command.label, command.timestamp, &key_id);
   if (result == KM_ERR_AUTH_REQUIRED) {
     km_usb_write_response(km_command_response_auth_required, NULL, 0);
     goto cleanup;

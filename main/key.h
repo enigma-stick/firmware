@@ -8,6 +8,8 @@
 #define KEYMGR_LIST_FILTER_USAGE (1 << 2)
 #define KEYMGR_LIST_FILTER_ID (1 << 3)
 
+#define KEYMGR_KEY_META_CURRENT_VERSION 1
+
 typedef enum {
   km_key_type_aes = 0x01,
   km_key_type_rsa = 0x02,
@@ -30,6 +32,7 @@ typedef struct {
   km_key_usage_t usage;
   uint16_t size;
   char *label;
+  uint32_t created_at;
 } km_key_metadata_t;
 
 #endif // KEYMGR_KEY_H

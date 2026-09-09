@@ -62,17 +62,10 @@ esp_err_t km_token_get_status(km_token_status_t *token_status);
 esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
                                     km_key_metadata_t *out);
 
-/** generate AES key **/
-esp_err_t km_token_generate_aes(uint16_t bits, km_key_usage_t usage,
-                                const char *label, uint32_t *key_id);
-
-/** generate RSA key pair **/
-esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
-                                const char *label, uint32_t *key_id);
-
-/** generate EC key pair **/
-esp_err_t km_token_generate_ec(uint16_t size, km_key_usage_t usage,
-                               const char *label, uint32_t *key_id);
+/** generate a key **/
+esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
+                                km_key_usage_t usage, const char *label,
+                                uint32_t timestamp, uint32_t *key_id);
 
 /** encrypt with AES key **/
 esp_err_t km_token_encrypt_aes_gcm(km_memory_pool_t *pool,

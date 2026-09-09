@@ -20,6 +20,7 @@ typedef struct {
   km_key_usage_t usage;
   uint16_t bits;
   char *label;
+  uint32_t timestamp;
 } km_command_generate_key_t;
 
 typedef struct {

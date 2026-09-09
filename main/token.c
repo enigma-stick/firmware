@@ -375,10 +375,24 @@ esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
 
   km_deserializer_t *dz = km_dz_init_move(pool, data, len);
 
+  // In the future, if we need to change the contract, we need to see which
+  // version is here, and parse based on that version instead of just dying
+  // here. Currently, there is only one metadata version.
+  uint32_t version;
+  if (!km_dz_u32(dz, &version)) {
+    ESP_LOGE(TAG, "Truncated key metadata version");
+    return ESP_FAIL;
+  }
+  if (version != KEYMGR_KEY_META_CURRENT_VERSION) {
+    ESP_LOGE(TAG, "Unsupported key metadata version");
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+
   uint32_t type;
   uint32_t usage;
   if (!km_dz_u32(dz, &type) || !km_dz_u32(dz, &usage) ||
-      !km_dz_u16(dz, &out->size) || !km_dz_str(pool, dz, &out->label)) {
+      !km_dz_u16(dz, &out->size) || !km_dz_str(pool, dz, &out->label) ||
+      !km_dz_u32(dz, &out->created_at)) {
     ESP_LOGE(TAG, "Could not deserialize key metadata from NVS");
     return ESP_FAIL;
   }
@@ -389,106 +403,79 @@ esp_err_t km_token_get_key_metadata(km_memory_pool_t *pool, uint32_t key_id,
   return ESP_OK;
 }
 
-esp_err_t km_token_generate_aes(uint16_t bits, km_key_usage_t usage,
-                                const char *label, uint32_t *key_id) {
-
-  if (!token_metadata_loaded) {
-    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
-    return ESP_ERR_INVALID_STATE;
-  }
-
+static esp_err_t km_token_generate_aes(uint16_t bits, km_key_usage_t usage,
+                                       uint32_t *key_id) {
   if (usage != km_key_usage_encrypt) {
     ESP_LOGE(TAG, "Invalid key usage for AES key");
     return ESP_ERR_INVALID_ARG;
   }
 
-  esp_err_t status =
-      km_se_worker_generate_aes(token_metadata.se_hmac_id, bits, key_id);
-  if (status != ESP_OK) {
-    ESP_LOGE(TAG, "Could not generate AES key");
-    return status;
-  }
-
-  char name[15] = {0};
-  snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
-
-  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_u32(sz, km_key_type_aes);
-  km_sz_u32(sz, usage);
-  km_sz_u16(sz, bits);
-  km_sz_str(sz, label);
-
-  if (!km_store_write(name, sz->data, sz->len)) {
-    ESP_LOGE(TAG, "Could not save key metadata to NVS");
-    status = ESP_FAIL;
-  }
-
-  km_sz_free(sz);
-  return status;
+  return km_se_worker_generate_aes(token_metadata.se_hmac_id, bits, key_id);
 }
 
-esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
-                                const char *label, uint32_t *key_id) {
-  if (!token_metadata_loaded) {
-    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
-    return ESP_ERR_INVALID_STATE;
-  }
-
+static esp_err_t km_token_generate_rsa(uint16_t bits, km_key_usage_t usage,
+                                       uint32_t *key_id) {
   if (usage != km_key_usage_encrypt && usage != km_key_usage_sign) {
     ESP_LOGE(TAG, "Invalid key usage for RSA key");
     return ESP_ERR_INVALID_ARG;
   }
 
-  esp_err_t status = km_se_worker_generate_rsa(bits, usage, key_id);
-  if (status != ESP_OK) {
-    ESP_LOGE(TAG, "Could not generate RSA key");
-    return status;
-  }
-
-  char name[15] = {0};
-  snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
-
-  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_u32(sz, km_key_type_rsa);
-  km_sz_u32(sz, usage);
-  km_sz_u16(sz, bits);
-  km_sz_str(sz, label);
-
-  if (!km_store_write(name, sz->data, sz->len)) {
-    ESP_LOGE(TAG, "Could not save key metadata to NVS");
-    status = ESP_FAIL;
-  }
-
-  km_sz_free(sz);
-  return status;
+  return km_se_worker_generate_rsa(bits, usage, key_id);
 }
 
-esp_err_t km_token_generate_ec(uint16_t size, km_key_usage_t usage,
-                               const char *label, uint32_t *key_id) {
-  if (!token_metadata_loaded) {
-    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
-    return ESP_ERR_INVALID_STATE;
-  }
+static esp_err_t km_token_generate_ec(uint16_t size, km_key_usage_t usage,
+                                      uint32_t *key_id) {
 
   if (usage != km_key_usage_sign && usage != km_key_usage_derive) {
     ESP_LOGE(TAG, "Invalid key usage for EC key");
     return ESP_ERR_INVALID_ARG;
   }
 
-  esp_err_t status = km_se_worker_generate_ec(size, usage, key_id);
-  if (status != ESP_OK) {
-    ESP_LOGE(TAG, "Could not generate EC key");
-    return status;
+  return km_se_worker_generate_ec(size, usage, key_id);
+}
+
+esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
+                                km_key_usage_t usage, const char *label,
+                                uint32_t timestamp, uint32_t *key_id) {
+  if (label == NULL || key_id == NULL) {
+    return ESP_ERR_INVALID_ARG;
   }
+
+  *key_id = 0;
+
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot generate keys before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status;
+  switch (type) {
+  case km_key_type_aes:
+    status = km_token_generate_aes(bits, usage, key_id);
+    break;
+  case km_key_type_rsa:
+    status = km_token_generate_rsa(bits, usage, key_id);
+    break;
+  case km_key_type_ec:
+    status = km_token_generate_ec(bits, usage, key_id);
+    break;
+  default:
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (status != ESP_OK)
+    return status;
 
   char name[15] = {0};
   snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
 
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_u32(sz, km_key_type_ec);
+  km_sz_u32(sz, KEYMGR_KEY_META_CURRENT_VERSION);
+  km_sz_u32(sz, type);
   km_sz_u32(sz, usage);
-  km_sz_u16(sz, size);
+  km_sz_u16(sz, bits);
   km_sz_str(sz, label);
+  km_sz_u32(sz, timestamp);
 
   if (!km_store_write(name, sz->data, sz->len)) {
     ESP_LOGE(TAG, "Could not save key metadata to NVS");
