@@ -105,6 +105,12 @@ esp_err_t km_token_verify_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
                                uint8_t *message, size_t message_len,
                                uint8_t *mac, size_t mac_len, bool *verified);
 
+/** perform ECDH + HKDF **/
+esp_err_t km_token_derive_ecdh(km_memory_pool_t *pool, km_key_metadata_t *key,
+                               const char *label, uint8_t *pub_key,
+                               size_t pub_key_len, uint8_t **salt,
+                               size_t *salt_len, uint32_t *result_id);
+
 /** get public key **/
 esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
                                   km_key_metadata_t *key, uint8_t **public_key,

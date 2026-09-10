@@ -125,6 +125,29 @@ static void token_metadata_set_defaults(km_token_metadata_t *metadata) {
   metadata->esp_key_id = KEYMGR_ESP_HMAC_KEY_ID;
 }
 
+static esp_err_t token_write_key_metadata(km_key_metadata_t *key) {
+  char name[15] = {0};
+  snprintf(name, sizeof(name), "km:%08" PRIx32, key->id);
+
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u32(sz, KEYMGR_KEY_META_CURRENT_VERSION);
+  km_sz_u32(sz, key->type);
+  km_sz_u32(sz, key->usage);
+  km_sz_u16(sz, key->size);
+  km_sz_str(sz, key->label);
+  km_sz_u32(sz, key->created_at);
+
+  esp_err_t status = ESP_FAIL;
+  if (!km_store_write(name, sz->data, sz->len)) {
+    ESP_LOGE(TAG, "Could not save key metadata to NVS");
+  } else {
+    status = ESP_OK;
+  }
+
+  km_sz_free(sz);
+  return status;
+}
+
 esp_err_t km_token_init(void) {
   token_metadata_loaded = false;
 
@@ -481,23 +504,15 @@ esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
   if (status != ESP_OK)
     return status;
 
-  char name[15] = {0};
-  snprintf(name, sizeof(name), "km:%08" PRIx32, *key_id);
+  km_key_metadata_t key = {0};
+  key.id = *key_id;
+  key.type = type;
+  key.usage = usage;
+  key.size = bits;
+  key.label = (char *)label;
+  key.created_at = timestamp;
+  status = token_write_key_metadata(&key);
 
-  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
-  km_sz_u32(sz, KEYMGR_KEY_META_CURRENT_VERSION);
-  km_sz_u32(sz, type);
-  km_sz_u32(sz, usage);
-  km_sz_u16(sz, bits);
-  km_sz_str(sz, label);
-  km_sz_u32(sz, timestamp);
-
-  if (!km_store_write(name, sz->data, sz->len)) {
-    ESP_LOGE(TAG, "Could not save key metadata to NVS");
-    status = ESP_FAIL;
-  }
-
-  km_sz_free(sz);
   return status;
 }
 
@@ -595,6 +610,34 @@ esp_err_t km_token_verify_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
 
   esp_err_t status = km_se_worker_verify_hmac(pool, key, message, message_len,
                                               mac, mac_len, verified);
+  return status;
+}
+
+esp_err_t km_token_derive_ecdh(km_memory_pool_t *pool, km_key_metadata_t *key,
+                               const char *label, uint8_t *pub_key,
+                               size_t pub_key_len, uint8_t **salt,
+                               size_t *salt_len, uint32_t *result_id) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform ECDH before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_derive_ecdh(pool, key, pub_key, pub_key_len,
+                                              salt, salt_len, result_id);
+
+  if (status != ESP_OK) {
+    return status;
+  }
+
+  km_key_metadata_t meta;
+  meta.id = *result_id;
+  meta.type = km_key_type_aes;
+  meta.usage = km_key_usage_encrypt;
+  meta.size = 256;
+  meta.label = (char *)label;
+  meta.created_at = 0; // TODO: include this in command payload
+  status = token_write_key_metadata(&meta);
+
   return status;
 }
 

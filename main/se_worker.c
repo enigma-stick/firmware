@@ -1556,6 +1556,286 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t
+se_worker_derive_ecdh_impl(se_worker_context_t *ctx, km_memory_pool_t *pool,
+                           km_key_metadata_t *key, uint8_t *pub_key,
+                           size_t pub_key_len, uint8_t **salt, size_t *salt_len,
+                           uint32_t *result_id) {
+  if (pool == NULL || key == NULL || pub_key == NULL || pub_key_len == 0 ||
+      salt == NULL || salt_len == NULL || result_id == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *salt = NULL;
+  *salt_len = 0;
+  *result_id = 0;
+
+  sss_object_t prv_ec = {0};
+  sss_object_t pub_ec = {0};
+  sss_object_t hmac = {0};
+  sss_object_t destination = {0};
+  sss_derive_key_t ecdh_ctx = {0};
+  sss_derive_key_t hkdf_ctx = {0};
+  bool prv_ec_init = false;
+  bool pub_ec_init = false;
+  bool pub_ec_alloc = false;
+  bool hmac_init = false;
+  bool hmac_alloc = false;
+  bool destination_init = false;
+  bool destination_alloc = false;
+  bool ecdh_init = false;
+  bool hkdf_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint32_t obj_id = KEYMGR_SE_APP_KEY_FIRST;
+  bool exists = false;
+  for (; obj_id <= KEYMGR_SE_APP_KEY_LAST; obj_id++) {
+    se05x_esp_admin_status_t result =
+        se05x_esp_admin_object_exists(&ctx->session, obj_id, &exists);
+
+    if (result != SE05X_ESP_ADMIN_OK) {
+      ESP_LOGE(TAG, "Could not determine if object exists during object scan");
+      return ESP_FAIL;
+    }
+
+    if (!exists) {
+      break;
+    }
+  }
+  if (exists) {
+    ESP_LOGE(TAG, "Could not find free object");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Destination key ID = %08" PRIx32, obj_id);
+
+  // EC private key - we have this in SE
+  sss_status_t status = sss_key_object_init(&prv_ec, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to init EC private key handle");
+    goto cleanup;
+  }
+  prv_ec_init = true;
+
+  status = sss_key_object_get_handle(&prv_ec, key->id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to retrieve EC private key handle");
+    goto cleanup;
+  }
+
+  // EC public key - we need to import this
+  status = sss_key_object_init(&pub_ec, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to init EC peer key handle");
+    goto cleanup;
+  }
+  pub_ec_init = true;
+
+  status = sss_key_object_allocate_handle(
+      &pub_ec, KEYMGR_SE_CK_ECDH_PUB, kSSS_KeyPart_Public,
+      kSSS_CipherType_EC_NIST_P, (key->size + 7) / 8,
+      kKeyObject_Mode_Transient);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate EC peer key handle");
+    goto cleanup;
+  }
+
+  sss_policy_u common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {
+          .can_Write = 1, .can_Read = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u ec_policy = {.type = KPolicy_Asym_Key,
+                            .auth_obj_id = ctx->auth_object_id,
+                            .policy.asymmkey = {.can_KA = 1}};
+
+  sss_policy_t policies = {.policies = {&common_policy, &ec_policy},
+                           .nPolicies = 2};
+
+  status = sss_key_store_set_key(&ctx->key_store, &pub_ec, pub_key, pub_key_len,
+                                 key->size, &policies, sizeof(policies));
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to import EC peer key");
+    goto cleanup;
+  }
+  pub_ec_alloc = true;
+
+  // ECDH -> hmac
+  status = sss_key_object_init(&hmac, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to init HMAC handle");
+    goto cleanup;
+  }
+  hmac_init = true;
+
+  status = sss_key_object_allocate_handle(
+      &hmac, KEYMGR_SE_CK_ECDH_HMAC, kSSS_KeyPart_Default, kSSS_CipherType_HMAC,
+      (key->size + 7) / 8, kKeyObject_Mode_Transient);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate HMAC handle");
+    goto cleanup;
+  }
+
+  sss_policy_u h_common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {.can_Write = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u hmac_policy = {
+      .type = KPolicy_Sym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.symmkey = {.can_HKDF = 1, .forbid_Derived_Output = 1}};
+
+  sss_policy_t h_policies = {.policies = {&h_common_policy, &hmac_policy},
+                             .nPolicies = 2};
+
+  size_t hmac_init_capacity = (key->size + 7) / 8;
+  uint8_t *hmac_init_buffer = km_memory_alloc(pool, hmac_init_capacity);
+  if (hmac_init_buffer == NULL) {
+    ESP_LOGE(TAG, "Could not allocate HMAC placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+  if (!km_crypto_rand(hmac_init_buffer, hmac_init_capacity)) {
+    ESP_LOGE(TAG, "Could not generate HMAC placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+  status = sss_key_store_set_key(&ctx->key_store, &hmac, hmac_init_buffer,
+                                 hmac_init_capacity, hmac_init_capacity * 8,
+                                 &h_policies, sizeof(h_policies));
+  km_crypto_zero(hmac_init_buffer, hmac_init_capacity);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize HMAC material");
+    goto cleanup;
+  }
+  hmac_alloc = true;
+
+  status = sss_derive_key_context_init(
+      &ecdh_ctx, (sss_session_t *)&ctx->session.sss, &prv_ec,
+      kAlgorithm_SSS_ECDH, kMode_SSS_ComputeSharedSecret);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize ECDH derivation context");
+    goto cleanup;
+  }
+  ecdh_init = true;
+
+  status = sss_derive_key_dh(&ecdh_ctx, &pub_ec, &hmac);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to derive HMAC material with ECDH");
+    goto cleanup;
+  }
+
+  // HMAC -> HKDF -> AES
+  status = sss_key_object_init(&destination, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize destination AES key handle");
+    goto cleanup;
+  }
+  destination_init = true;
+
+  status = sss_key_object_allocate_handle(
+      &destination, obj_id, kSSS_KeyPart_Default, kSSS_CipherType_AES, 32,
+      kKeyObject_Mode_Persistent);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to allocate destination AES key handle");
+    goto cleanup;
+  }
+
+  sss_policy_u d_common_policy = {
+      .type = KPolicy_Common,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.common = {.can_Write = 1, .can_Delete = 1, .req_Sm = 1}};
+
+  sss_policy_u dest_policy = {
+      .type = KPolicy_Sym_Key,
+      .auth_obj_id = ctx->auth_object_id,
+      .policy.symmkey = {.can_Encrypt = 1, .can_Decrypt = 1}};
+
+  sss_policy_t d_policies = {.policies = {&d_common_policy, &dest_policy},
+                             .nPolicies = 2};
+
+  uint8_t dest_init[32];
+  if (!km_crypto_rand(dest_init, sizeof(dest_init))) {
+    ESP_LOGE(TAG, "Could not generate destination placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+  status = sss_key_store_set_key(&ctx->key_store, &destination, dest_init,
+                                 sizeof(dest_init), 256, &d_policies,
+                                 sizeof(d_policies));
+  km_crypto_zero(dest_init, sizeof(dest_init));
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize AES key material");
+    goto cleanup;
+  }
+  destination_alloc = true;
+
+  uint8_t salt_buffer[KEYMGR_TOKEN_SALT_SIZE];
+  if (!km_crypto_rand(salt_buffer, sizeof(salt_buffer))) {
+    ESP_LOGE(TAG, "Could not generate salt placeholder");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+  const char *info = "enigma/ecdh/aes256/v1";
+
+  status = sss_derive_key_context_init(
+      &hkdf_ctx, (sss_session_t *)&ctx->session.sss, &hmac,
+      kAlgorithm_SSS_HMAC_SHA256, kMode_SSS_HKDF_ExtractExpand);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to initialize HKDF derivation context");
+    goto cleanup;
+  }
+  hkdf_init = true;
+
+  status =
+      sss_derive_key_one_go(&hkdf_ctx, salt_buffer, KEYMGR_TOKEN_SALT_SIZE,
+                            (uint8_t *)info, strlen(info), &destination, 32);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Failed to derive AES key");
+    goto cleanup;
+  }
+
+  *salt = km_memory_alloc(pool, sizeof(salt_buffer));
+  if (*salt == NULL) {
+    ESP_LOGE(TAG, "Could not allocate heap memory for salt");
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+  memcpy(*salt, salt_buffer, sizeof(salt_buffer));
+  *salt_len = sizeof(salt_buffer);
+  *result_id = obj_id;
+
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (hkdf_init)
+    sss_derive_key_context_free(&hkdf_ctx);
+  if (ecdh_init)
+    sss_derive_key_context_free(&ecdh_ctx);
+  if (status != kStatus_SSS_Success && destination_alloc == true)
+    sss_key_store_erase_key(&ctx->key_store, &destination);
+  if (destination_init)
+    sss_key_object_free(&destination);
+  if (hmac_alloc)
+    sss_key_store_erase_key(&ctx->key_store, &hmac);
+  if (hmac_init)
+    sss_key_object_free(&hmac);
+  if (pub_ec_alloc)
+    sss_key_store_erase_key(&ctx->key_store, &pub_ec);
+  if (pub_ec_init)
+    sss_key_object_free(&pub_ec);
+  if (prv_ec_init)
+    sss_key_object_free(&prv_ec);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t se_worker_get_public_key_rsa_impl(se_worker_context_t *ctx,
                                                    km_memory_pool_t *pool,
                                                    km_key_metadata_t *key,
@@ -1741,6 +2021,7 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_SIGN_EC_ECDSA:
   case SE_REQUEST_SIGN_HMAC:
   case SE_REQUEST_VERIFY_HMAC:
+  case SE_REQUEST_DERIVE_ECDH:
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
   case SE_REQUEST_GET_PUBLIC_KEY_EC:
   case SE_REQUEST_DESTROY_KEY:
@@ -1833,6 +2114,13 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         request->args.verify.message, request->args.verify.message_len,
         request->args.verify.signature, request->args.verify.signature_len,
         request->args.verify.verified);
+  case SE_REQUEST_DERIVE_ECDH:
+    return se_worker_derive_ecdh_impl(
+        ctx, request->args.derive_ecdh.pool, request->args.derive_ecdh.key,
+        request->args.derive_ecdh.pub_key,
+        request->args.derive_ecdh.pub_key_len, request->args.derive_ecdh.salt,
+        request->args.derive_ecdh.salt_len,
+        request->args.derive_ecdh.result_id);
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
     return se_worker_get_public_key_rsa_impl(
         ctx, request->args.get_public_key.pool,
@@ -2277,6 +2565,32 @@ esp_err_t km_se_worker_verify_hmac(km_memory_pool_t *pool,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue verify hmac request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_derive_ecdh(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *pub_key,
+                                   size_t pub_key_len, uint8_t **salt,
+                                   size_t *salt_len, uint32_t *result_id) {
+  se_request_t request = {.type = SE_REQUEST_DERIVE_ECDH,
+                          .args.derive_ecdh = {.pool = pool,
+                                               .key = key,
+                                               .pub_key = pub_key,
+                                               .pub_key_len = pub_key_len,
+                                               .salt = salt,
+                                               .salt_len = salt_len,
+                                               .result_id = result_id}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue ecdh request");
     return ESP_FAIL;
   }
 

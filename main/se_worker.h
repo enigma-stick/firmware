@@ -11,6 +11,8 @@
 
 #define KEYMGR_SE_ECDH_KEY_A_ID 0x4B4DFF33u
 #define KEYMGR_SE_ECDH_KEY_B_ID 0x4B4DFF34u
+#define KEYMGR_SE_CK_ECDH_PUB 0x4B4DFF80u
+#define KEYMGR_SE_CK_ECDH_HMAC 0x4B4DFF81u
 
 #define KM_ERR_AUTH_REQUIRED 0xf000
 
@@ -38,6 +40,7 @@ typedef enum {
   SE_REQUEST_SIGN_EC_ECDSA,
   SE_REQUEST_SIGN_HMAC,
   SE_REQUEST_VERIFY_HMAC,
+  SE_REQUEST_DERIVE_ECDH,
   SE_REQUEST_GET_PUBLIC_KEY_RSA,
   SE_REQUEST_GET_PUBLIC_KEY_EC,
   SE_REQUEST_DESTROY_KEY
@@ -140,6 +143,16 @@ typedef struct _request_t {
     struct {
       km_memory_pool_t *pool;
       km_key_metadata_t *key;
+      uint8_t *pub_key;
+      size_t pub_key_len;
+      uint8_t **salt;
+      size_t *salt_len;
+      uint32_t *result_id;
+    } derive_ecdh;
+
+    struct {
+      km_memory_pool_t *pool;
+      km_key_metadata_t *key;
       uint8_t **public_key;
       size_t *public_key_len;
     } get_public_key;
@@ -209,6 +222,10 @@ esp_err_t km_se_worker_verify_hmac(km_memory_pool_t *pool,
                                    km_key_metadata_t *key, uint8_t *message,
                                    size_t message_len, uint8_t *mac,
                                    size_t mac_len, bool *verified);
+esp_err_t km_se_worker_derive_ecdh(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *pub_key,
+                                   size_t pub_key_len, uint8_t **salt,
+                                   size_t *salt_len, uint32_t *result_id);
 esp_err_t km_se_worker_get_public_key_rsa(km_memory_pool_t *pool,
                                           km_key_metadata_t *key,
                                           uint8_t **public_key,

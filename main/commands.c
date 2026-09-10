@@ -259,6 +259,48 @@ size_t km_command_response_verify_serialize(
   return len;
 }
 
+bool km_command_derive_ecdh_deserialize(km_memory_pool_t *pool,
+                                        const uint8_t *payload, size_t len,
+                                        km_command_derive_ecdh_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_derive_ecdh_t command;
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  uint32_t encoding;
+  uint32_t pub_key_len;
+  if (!km_dz_u32(dz, &command.prv_key_id) || !km_dz_u32(dz, &encoding) ||
+      !km_dz_u32(dz, &pub_key_len)) {
+    return false;
+  }
+  command.pub_encoding = (km_public_key_encoding_t)encoding;
+  command.pub_key_len = pub_key_len;
+  command.pub_key = km_memory_alloc(pool, command.pub_key_len);
+  km_dz_array(km_dz_u8, dz, command.pub_key, command.pub_key_len);
+  km_dz_str(pool, dz, &command.result_label);
+
+  *out = command;
+  return true;
+}
+
+size_t km_command_response_derive_ecdh_serialize(
+    km_memory_pool_t *pool, const km_command_response_derive_ecdh_t *response,
+    uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u32(sz, response->key_id);
+  km_sz_array(km_sz_u8, sz, response->salt, response->salt_len);
+  km_sz_str(sz, response->info);
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
 bool km_command_get_key_deserialize(km_memory_pool_t *pool,
                                     const uint8_t *payload, size_t len,
                                     km_command_get_key_t *out) {
@@ -739,6 +781,76 @@ cleanup:
   km_memory_free(pool);
 }
 
+static void km_command_handle_derive_ecdh(const km_frame_header_t *frame_header,
+                                          const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_derive_ecdh_t command;
+  if (!km_command_derive_ecdh_deserialize(pool, payload, frame_header->length,
+                                          &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_metadata_t key_meta;
+  esp_err_t status =
+      km_token_get_key_metadata(pool, command.prv_key_id, &key_meta);
+  if (status != ESP_OK) {
+    km_usb_write_error("Could not retrieve key metadata");
+    goto cleanup;
+  }
+
+  if (command.pub_encoding != km_public_key_encoding_der_spki) {
+    km_usb_write_error("Invalid public key encoding");
+    goto cleanup;
+  }
+
+  uint8_t *salt;
+  size_t salt_len;
+  uint32_t result_key_id;
+
+  switch (key_meta.type) {
+  case km_key_type_ec:
+    status = km_token_derive_ecdh(pool, &key_meta, command.result_label,
+                                  command.pub_key, command.pub_key_len, &salt,
+                                  &salt_len, &result_key_id);
+    break;
+  default:
+    km_usb_write_error("Invalid key type for requested operation");
+    goto cleanup;
+  }
+
+  if (status == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "ecdh failed: %s", esp_err_to_name(status));
+    km_usb_write_error("ECDH failed");
+    goto cleanup;
+  }
+
+  km_command_response_derive_ecdh_t response;
+  response.key_id = result_key_id;
+  response.salt = salt;
+  response.salt_len = salt_len;
+  response.info = "enigma/ecdh/aes256/v1";
+
+  uint8_t *out;
+  size_t out_len =
+      km_command_response_derive_ecdh_serialize(pool, &response, &out);
+  if (out_len == 0) {
+    km_usb_write_error("Could not deserialize response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_derive_ecdh, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
 static void km_command_handle_get_key(const km_frame_header_t *frame_header,
                                       const uint8_t *payload) {
   km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
@@ -917,6 +1029,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_verify:
     km_command_handle_verify(frame_header, payload);
+    break;
+  case km_command_derive_ecdh:
+    km_command_handle_derive_ecdh(frame_header, payload);
     break;
   case km_command_get_key:
     km_command_handle_get_key(frame_header, payload);

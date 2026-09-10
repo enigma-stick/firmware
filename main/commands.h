@@ -73,6 +73,21 @@ typedef struct {
 } km_command_response_verify_t;
 
 typedef struct {
+  uint32_t prv_key_id;
+  km_public_key_encoding_t pub_encoding;
+  uint8_t *pub_key;
+  size_t pub_key_len;
+  char *result_label;
+} km_command_derive_ecdh_t;
+
+typedef struct {
+  uint32_t key_id;
+  uint8_t *salt;
+  size_t salt_len;
+  char *info;
+} km_command_response_derive_ecdh_t;
+
+typedef struct {
   uint32_t key_id;
 } km_command_get_key_t;
 
