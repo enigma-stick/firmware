@@ -36,5 +36,5 @@ support for two status LEDs via GPIO which can be safely ignored if desired.
   - [x] Search by label/type/usage
   - [x] Fetch metadata by ID
   - [x] Support key deletion
-- [ ] Proper error code responses
+- [x] Proper error code responses
 - [ ] Storage visibility

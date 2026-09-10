@@ -1,6 +1,7 @@
 #ifndef KEYMGR_PROTOCOL_H
 #define KEYMGR_PROTOCOL_H
 
+#include "esp_err.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,6 +41,25 @@ enum km_command_response_type {
   km_command_response_list = 0x40,
   km_command_response_error = 0xFF,
 };
+
+typedef enum {
+  km_error_ok = 0x00,
+  km_error_auth_required = 0x01,
+  km_error_auth_failed = 0x02,
+  km_error_invalid_input = 0x03,
+  km_error_unsupported_operation = 0x04,
+  km_error_missing_key = 0x05,
+  km_error_policy_reject = 0x06,
+  km_error_storage = 0x07,
+  km_error_bad_command = 0x08,
+  km_error_serialize = 0x09,
+  km_error_init_failed = 0x0A,
+  km_error_invalid_state = 0x0B,
+  km_error_fail = 0xFF
+} km_error_t;
+
+km_error_t km_err_from_esp(esp_err_t err, km_error_t def);
+km_error_t km_err_key_lookup(esp_err_t err, km_error_t def);
 
 typedef struct _frame_header {
   uint8_t magic[4];

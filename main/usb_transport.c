@@ -37,8 +37,9 @@ void km_usb_write_response(enum km_command_response_type type,
   free(buffer);
 }
 
-void km_usb_write_error(const char *err) {
+void km_usb_write_error(km_error_t code, const char *err) {
   km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+  km_sz_u8(sz, code);
   km_sz_str(sz, err);
   km_usb_write_response(km_command_response_error, sz->data, sz->len);
   km_sz_free(sz);
@@ -68,7 +69,7 @@ static void km_usb_task_handler(void *ctx) {
       km_frame_parse_result_t result = km_frame_parser_feed(
           &parser, rx_buffer[i], km_usb_frame_handler, ctx);
       if (result == km_frame_parse_too_long) {
-        km_usb_write_error("Command too long");
+        km_usb_write_error(km_error_bad_command, "Command too long");
       }
     }
   }

@@ -281,6 +281,10 @@ bool km_command_derive_ecdh_deserialize(km_memory_pool_t *pool,
   km_dz_array(km_dz_u8, dz, command.pub_key, command.pub_key_len);
   km_dz_str(pool, dz, &command.result_label);
 
+  if (!km_dz_u32(dz, &command.timestamp)) {
+    return false;
+  }
+
   *out = command;
   return true;
 }
@@ -409,7 +413,7 @@ static void km_command_handle_init(const km_frame_header_t *frame_header,
   km_command_init_t command;
   if (!km_command_init_deserialize(pool, payload, frame_header->length,
                                    &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
@@ -420,7 +424,8 @@ static void km_command_handle_init(const km_frame_header_t *frame_header,
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Could not initialize token: %s", esp_err_to_name(err));
-    km_usb_write_error("Failed to initialize token");
+    km_usb_write_error(km_err_from_esp(err, km_error_init_failed),
+                       "Failed to initialize token");
     goto cleanup;
   }
 
@@ -438,7 +443,7 @@ km_command_handle_authenticate(const km_frame_header_t *frame_header,
   km_command_authenticate_t command;
   if (!km_command_authenticate_deserialize(pool, payload, frame_header->length,
                                            &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
@@ -448,7 +453,8 @@ km_command_handle_authenticate(const km_frame_header_t *frame_header,
 
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Could not authenticate token: %s", esp_err_to_name(err));
-    km_usb_write_error("Failed to authenticate token");
+    km_usb_write_error(km_err_from_esp(err, km_error_auth_failed),
+                       "Failed to authenticate token");
     goto cleanup;
   }
 
@@ -462,8 +468,10 @@ static void km_command_handle_status(void) {
   km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
 
   km_token_status_t token_status;
-  if (km_token_get_status(&token_status) != ESP_OK) {
-    km_usb_write_error("Could not get token status");
+  esp_err_t status = km_token_get_status(&token_status);
+  if (status != ESP_OK) {
+    km_usb_write_error(km_err_from_esp(status, km_error_invalid_state),
+                       "Could not get token status");
     goto cleanup;
   }
 
@@ -473,7 +481,7 @@ static void km_command_handle_status(void) {
   uint8_t *payload;
   size_t len = km_command_response_status_serialize(pool, &response, &payload);
   if (len == 0) {
-    km_usb_write_error("Could not serialize response");
+    km_usb_write_error(km_error_serialize, "Could not serialize response");
     goto cleanup;
   }
 
@@ -484,7 +492,13 @@ cleanup:
 }
 
 static void km_command_handle_lock(void) {
-  km_se_worker_close_session();
+  esp_err_t err = km_se_worker_close_session();
+  if (err != ESP_OK) {
+    km_usb_write_error(km_err_from_esp(err, km_error_fail),
+                       "Failed to close session");
+    return;
+  }
+
   km_usb_write_success();
 }
 
@@ -496,7 +510,7 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
   km_command_generate_key_t command;
   if (!km_command_generate_key_deserialize(pool, payload, frame_header->length,
                                            &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
@@ -504,13 +518,9 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
   esp_err_t result =
       km_token_generate_key(command.type, command.bits, command.usage,
                             command.label, command.timestamp, &key_id);
-  if (result == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
-    goto cleanup;
-  }
-
   if (result != ESP_OK) {
-    km_usb_write_error("Could not generate key");
+    km_usb_write_error(km_err_from_esp(result, km_error_fail),
+                       "Could not generate key");
     goto cleanup;
   }
 
@@ -519,7 +529,7 @@ km_command_handle_generate_key(const km_frame_header_t *frame_header,
   size_t len =
       km_command_response_generate_key_serialize(pool, &response, &out);
   if (len == 0) {
-    ESP_LOGE(TAG, "Could not serialize response");
+    km_usb_write_error(km_error_serialize, "Could not serialize command");
     goto cleanup;
   }
 
@@ -536,14 +546,15 @@ static void km_command_handle_encrypt(const km_frame_header_t *frame_header,
   km_command_encrypt_t command;
   if (!km_command_encrypt_deserialize(pool, payload, frame_header->length,
                                       &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   km_key_metadata_t key_meta;
   esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
@@ -557,18 +568,15 @@ static void km_command_handle_encrypt(const km_frame_header_t *frame_header,
                                       &ciphertext_len);
     break;
   default:
-    km_usb_write_error("Unsupported key type for requsted operation");
-    goto cleanup;
-  }
-
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    km_usb_write_error(km_error_unsupported_operation,
+                       "Unsupported key type for requsted operation");
     goto cleanup;
   }
 
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "encryption failed: %s", esp_err_to_name(status));
-    km_usb_write_error("Encryption failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail),
+                       "Encryption failed");
     goto cleanup;
   }
 
@@ -579,7 +587,8 @@ static void km_command_handle_encrypt(const km_frame_header_t *frame_header,
   size_t out_len = km_command_response_encrypt_serialize(pool, &response, &out);
 
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize command response");
+    km_usb_write_error(km_error_serialize,
+                       "Could not serialize command response");
     goto cleanup;
   }
 
@@ -596,14 +605,15 @@ static void km_command_handle_decrypt(const km_frame_header_t *frame_header,
   km_command_decrypt_t command;
   if (!km_command_decrypt_deserialize(pool, payload, frame_header->length,
                                       &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   km_key_metadata_t key_meta;
   esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
@@ -622,18 +632,15 @@ static void km_command_handle_decrypt(const km_frame_header_t *frame_header,
                                        &plaintext_len);
     break;
   default:
-    km_usb_write_error("Unsupported key type for requsted operation");
-    goto cleanup;
-  }
-
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    km_usb_write_error(km_error_unsupported_operation,
+                       "Unsupported key type for requsted operation");
     goto cleanup;
   }
 
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "decryption failed: %s", esp_err_to_name(status));
-    km_usb_write_error("Decryption failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail),
+                       "Decryption failed");
     goto cleanup;
   }
 
@@ -644,7 +651,8 @@ static void km_command_handle_decrypt(const km_frame_header_t *frame_header,
   size_t out_len = km_command_response_decrypt_serialize(pool, &response, &out);
 
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize command response");
+    km_usb_write_error(km_error_serialize,
+                       "Could not serialize command response");
     goto cleanup;
   }
 
@@ -661,14 +669,15 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
   km_command_sign_t command;
   if (!km_command_sign_deserialize(pool, payload, frame_header->length,
                                    &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   km_key_metadata_t key_meta;
   esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
@@ -692,18 +701,14 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
                            command.message_len, &signature, &signature_len);
     break;
   default:
-    km_usb_write_error("Unsupported key type for requsted operation");
-    goto cleanup;
-  }
-
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    km_usb_write_error(km_error_unsupported_operation,
+                       "Unsupported key type for requsted operation");
     goto cleanup;
   }
 
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "sign failed: %s", esp_err_to_name(status));
-    km_usb_write_error("Sign failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail), "Sign failed");
     goto cleanup;
   }
 
@@ -714,7 +719,8 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
   size_t out_len = km_command_response_sign_serialize(pool, &response, &out);
 
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize command response");
+    km_usb_write_error(km_error_serialize,
+                       "Could not serialize command response");
     goto cleanup;
   }
 
@@ -731,14 +737,15 @@ static void km_command_handle_verify(const km_frame_header_t *frame_header,
   km_command_verify_t command;
   if (!km_command_verify_deserialize(pool, payload, frame_header->length,
                                      &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   km_key_metadata_t key_meta;
   esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
@@ -750,18 +757,13 @@ static void km_command_handle_verify(const km_frame_header_t *frame_header,
                                   command.signature_len, &verified);
     break;
   default:
-    km_usb_write_error("Invalid key type");
-    goto cleanup;
-  }
-
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    km_usb_write_error(km_error_unsupported_operation, "Invalid key type");
     goto cleanup;
   }
 
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "verify failed: %s", esp_err_to_name(status));
-    km_usb_write_error("Verify failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail), "Verify failed");
     goto cleanup;
   }
 
@@ -771,7 +773,7 @@ static void km_command_handle_verify(const km_frame_header_t *frame_header,
   uint8_t *out;
   size_t out_len = km_command_response_verify_serialize(pool, &response, &out);
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize response");
+    km_usb_write_error(km_error_serialize, "Could not serialize response");
     goto cleanup;
   }
 
@@ -788,7 +790,7 @@ static void km_command_handle_derive_ecdh(const km_frame_header_t *frame_header,
   km_command_derive_ecdh_t command;
   if (!km_command_derive_ecdh_deserialize(pool, payload, frame_header->length,
                                           &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
@@ -796,12 +798,13 @@ static void km_command_handle_derive_ecdh(const km_frame_header_t *frame_header,
   esp_err_t status =
       km_token_get_key_metadata(pool, command.prv_key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
   if (command.pub_encoding != km_public_key_encoding_der_spki) {
-    km_usb_write_error("Invalid public key encoding");
+    km_usb_write_error(km_error_invalid_input, "Invalid public key encoding");
     goto cleanup;
   }
 
@@ -811,23 +814,19 @@ static void km_command_handle_derive_ecdh(const km_frame_header_t *frame_header,
 
   switch (key_meta.type) {
   case km_key_type_ec:
-    status = km_token_derive_ecdh(pool, &key_meta, command.result_label,
-                                  command.pub_key, command.pub_key_len, &salt,
-                                  &salt_len, &result_key_id);
+    status = km_token_derive_ecdh(
+        pool, &key_meta, command.result_label, command.timestamp,
+        command.pub_key, command.pub_key_len, &salt, &salt_len, &result_key_id);
     break;
   default:
-    km_usb_write_error("Invalid key type for requested operation");
-    goto cleanup;
-  }
-
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    km_usb_write_error(km_error_unsupported_operation,
+                       "Invalid key type for requested operation");
     goto cleanup;
   }
 
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "ecdh failed: %s", esp_err_to_name(status));
-    km_usb_write_error("ECDH failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail), "ECDH failed");
     goto cleanup;
   }
 
@@ -841,7 +840,7 @@ static void km_command_handle_derive_ecdh(const km_frame_header_t *frame_header,
   size_t out_len =
       km_command_response_derive_ecdh_serialize(pool, &response, &out);
   if (out_len == 0) {
-    km_usb_write_error("Could not deserialize response");
+    km_usb_write_error(km_error_serialize, "Could not deserialize response");
     goto cleanup;
   }
 
@@ -858,20 +857,23 @@ static void km_command_handle_get_key(const km_frame_header_t *frame_header,
   km_command_get_key_t command;
   if (!km_command_get_key_deserialize(pool, payload, frame_header->length,
                                       &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   km_key_metadata_t key_meta;
   esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
   if (status != ESP_OK) {
-    km_usb_write_error("Could not retrieve key metadata");
+    km_usb_write_error(km_err_key_lookup(status, km_error_fail),
+                       "Could not retrieve key metadata");
     goto cleanup;
   }
 
   switch (key_meta.type) {
+  case km_key_type_hmac:
   case km_key_type_aes:
-    km_usb_write_error("Cannot get symmetric key material");
+    km_usb_write_error(km_error_unsupported_operation,
+                       "Cannot get symmetric key material");
     goto cleanup;
   default:
     break;
@@ -882,14 +884,10 @@ static void km_command_handle_get_key(const km_frame_header_t *frame_header,
   status =
       km_token_get_public_key(pool, &key_meta, &public_key, &public_key_len);
 
-  if (status == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
-    goto cleanup;
-  }
-
   if (status != ESP_OK) {
     ESP_LOGE(TAG, "get public key failed: %s", esp_err_to_name(status));
-    km_usb_write_error("Get public key failed");
+    km_usb_write_error(km_err_from_esp(status, km_error_fail),
+                       "Get public key failed");
     goto cleanup;
   }
 
@@ -901,7 +899,8 @@ static void km_command_handle_get_key(const km_frame_header_t *frame_header,
   size_t out_len = km_command_response_get_key_serialize(pool, &response, &out);
 
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize command response");
+    km_usb_write_error(km_error_serialize,
+                       "Could not serialize command response");
     goto cleanup;
   }
 
@@ -918,7 +917,7 @@ static void km_command_handle_list(const km_frame_header_t *frame_header,
   km_command_list_t command;
   if (!km_command_list_deserialize(pool, payload, frame_header->length,
                                    &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
@@ -942,7 +941,8 @@ static void km_command_handle_list(const km_frame_header_t *frame_header,
   esp_err_t err = km_token_list_keys(pool, &keys, &count, key_type, key_usage,
                                      key_label, key_id);
   if (err != ESP_OK) {
-    km_usb_write_error("Error getting key list");
+    km_usb_write_error(km_err_from_esp(err, km_error_fail),
+                       "Error getting key list");
     goto cleanup;
   }
 
@@ -953,7 +953,7 @@ static void km_command_handle_list(const km_frame_header_t *frame_header,
   uint8_t *out;
   size_t out_len = km_command_response_list_serialize(pool, &response, &out);
   if (out_len == 0) {
-    km_usb_write_error("Could not serialize response");
+    km_usb_write_error(km_error_serialize, "Could not serialize response");
     goto cleanup;
   }
 
@@ -970,17 +970,14 @@ static void km_command_handle_destroy(const km_frame_header_t *frame_header,
   km_command_destroy_t command;
   if (!km_command_destroy_deserialize(pool, payload, frame_header->length,
                                       &command)) {
-    km_usb_write_error("Could not deserialize command");
+    km_usb_write_error(km_error_bad_command, "Could not deserialize command");
     goto cleanup;
   }
 
   esp_err_t err = km_token_destroy_key(command.key_id);
-  if (err == KM_ERR_AUTH_REQUIRED) {
-    km_usb_write_response(km_command_response_auth_required, NULL, 0);
-    goto cleanup;
-  }
   if (err != ESP_OK) {
-    km_usb_write_error("Could not destroy key");
+    km_usb_write_error(km_err_from_esp(err, km_error_fail),
+                       "Could not destroy key");
     goto cleanup;
   }
 
@@ -994,7 +991,7 @@ void km_commands_handle(km_app_context_t *ctx,
                         const km_frame_header_t *frame_header,
                         const uint8_t *payload) {
   if (frame_header->version != KM_PROTOCOL_VERSION) {
-    km_usb_write_error("Invalid command version");
+    km_usb_write_error(km_error_bad_command, "Invalid command version");
     return;
   }
 
@@ -1043,7 +1040,7 @@ void km_commands_handle(km_app_context_t *ctx,
     km_command_handle_destroy(frame_header, payload);
     break;
   default:
-    km_usb_write_error("Invalid command");
+    km_usb_write_error(km_error_bad_command, "Invalid command");
   }
   km_led_busy_off(ctx);
 }

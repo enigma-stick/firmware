@@ -1,4 +1,6 @@
 #include "protocol.h"
+#include "nvs.h"
+#include "se_worker.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -113,4 +115,31 @@ km_frame_parse_result_t km_frame_parser_feed(km_frame_parser_t *parser,
 
   km_frame_parser_reset(parser);
   return km_frame_parse_ok;
+}
+
+km_error_t km_err_from_esp(esp_err_t err, km_error_t def) {
+  switch (err) {
+  case ESP_ERR_INVALID_ARG:
+    return km_error_invalid_input;
+  case ESP_ERR_NVS_INVALID_HANDLE:
+  case ESP_ERR_NVS_INVALID_LENGTH:
+  case ESP_ERR_NVS_INVALID_NAME:
+  case ESP_ERR_NVS_INVALID_STATE:
+    return km_error_storage;
+  case ESP_ERR_INVALID_STATE:
+    return km_error_invalid_state;
+  case ESP_ERR_NOT_SUPPORTED:
+    return km_error_unsupported_operation;
+  case KM_ERR_AUTH_REQUIRED:
+    return km_error_auth_required;
+  default:
+    return def;
+  }
+}
+
+km_error_t km_err_key_lookup(esp_err_t err, km_error_t def) {
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    return km_error_missing_key;
+  }
+  return km_err_from_esp(err, def);
 }

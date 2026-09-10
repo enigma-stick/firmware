@@ -614,9 +614,10 @@ esp_err_t km_token_verify_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
 }
 
 esp_err_t km_token_derive_ecdh(km_memory_pool_t *pool, km_key_metadata_t *key,
-                               const char *label, uint8_t *pub_key,
-                               size_t pub_key_len, uint8_t **salt,
-                               size_t *salt_len, uint32_t *result_id) {
+                               const char *label, uint32_t timestamp,
+                               uint8_t *pub_key, size_t pub_key_len,
+                               uint8_t **salt, size_t *salt_len,
+                               uint32_t *result_id) {
   if (!token_metadata_loaded) {
     ESP_LOGE(TAG, "Cannot perform ECDH before token metadata is loaded");
     return ESP_ERR_INVALID_STATE;
@@ -635,7 +636,7 @@ esp_err_t km_token_derive_ecdh(km_memory_pool_t *pool, km_key_metadata_t *key,
   meta.usage = km_key_usage_encrypt;
   meta.size = 256;
   meta.label = (char *)label;
-  meta.created_at = 0; // TODO: include this in command payload
+  meta.created_at = timestamp;
   status = token_write_key_metadata(&meta);
 
   return status;

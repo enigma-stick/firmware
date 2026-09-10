@@ -78,6 +78,7 @@ typedef struct {
   uint8_t *pub_key;
   size_t pub_key_len;
   char *result_label;
+  uint32_t timestamp;
 } km_command_derive_ecdh_t;
 
 typedef struct {
