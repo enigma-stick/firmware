@@ -95,6 +95,16 @@ esp_err_t km_token_sign_ec_ecdsa(km_memory_pool_t *pool, km_key_metadata_t *key,
                                  uint8_t *message, size_t message_len,
                                  uint8_t **signature, size_t *signature_len);
 
+/** generate MAC for message **/
+esp_err_t km_token_sign_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                             uint8_t *message, size_t message_len,
+                             uint8_t **mac, size_t *mac_len);
+
+/** validate MAC for message **/
+esp_err_t km_token_verify_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                               uint8_t *message, size_t message_len,
+                               uint8_t *mac, size_t mac_len, bool *verified);
+
 /** get public key **/
 esp_err_t km_token_get_public_key(km_memory_pool_t *pool,
                                   km_key_metadata_t *key, uint8_t **public_key,

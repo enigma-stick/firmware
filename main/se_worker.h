@@ -36,6 +36,8 @@ typedef enum {
   SE_REQUEST_DECRYPT_RSA_OAEP,
   SE_REQUEST_SIGN_RSA_PSS,
   SE_REQUEST_SIGN_EC_ECDSA,
+  SE_REQUEST_SIGN_HMAC,
+  SE_REQUEST_VERIFY_HMAC,
   SE_REQUEST_GET_PUBLIC_KEY_RSA,
   SE_REQUEST_GET_PUBLIC_KEY_EC,
   SE_REQUEST_DESTROY_KEY
@@ -128,6 +130,16 @@ typedef struct _request_t {
     struct {
       km_memory_pool_t *pool;
       km_key_metadata_t *key;
+      uint8_t *message;
+      size_t message_len;
+      uint8_t *signature;
+      size_t signature_len;
+      bool *verified;
+    } verify;
+
+    struct {
+      km_memory_pool_t *pool;
+      km_key_metadata_t *key;
       uint8_t **public_key;
       size_t *public_key_len;
     } get_public_key;
@@ -167,8 +179,8 @@ esp_err_t km_se_worker_generate_rsa(uint16_t bits, km_key_usage_t usage,
                                     uint32_t *key_id);
 esp_err_t km_se_worker_generate_ec(uint16_t size, km_key_usage_t usage,
                                    uint32_t *key_id);
-esp_err_t km_se_worker_generate_hmac(uint32_t hmac_id, uint16_t size, km_key_usage_t usage,
-                                     uint32_t *key_id);
+esp_err_t km_se_worker_generate_hmac(uint32_t hmac_id, uint16_t size,
+                                     km_key_usage_t usage, uint32_t *key_id);
 esp_err_t km_se_worker_encrypt_aes_gcm(km_memory_pool_t *pool,
                                        km_key_metadata_t *key,
                                        uint8_t *plaintext, size_t plaintext_len,
@@ -190,6 +202,13 @@ esp_err_t km_se_worker_sign_ec_ecdsa(km_memory_pool_t *pool,
                                      km_key_metadata_t *key, uint8_t *message,
                                      size_t message_len, uint8_t **signature,
                                      size_t *signature_len);
+esp_err_t km_se_worker_sign_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                                 uint8_t *message, size_t message_len,
+                                 uint8_t **mac, size_t *mac_len);
+esp_err_t km_se_worker_verify_hmac(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *message,
+                                   size_t message_len, uint8_t *mac,
+                                   size_t mac_len, bool *verified);
 esp_err_t km_se_worker_get_public_key_rsa(km_memory_pool_t *pool,
                                           km_key_metadata_t *key,
                                           uint8_t **public_key,

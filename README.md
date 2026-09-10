@@ -27,7 +27,7 @@ support for two status LEDs via GPIO which can be safely ignored if desired.
 
 - [x] RSA OAEP decryption
 - [ ] ECDH + HKDF
-- [ ] HMAC keys
+- [x] HMAC keys
 - [x] Key Management
   - [x] List provisioned keys
   - [x] Search by label/type/usage

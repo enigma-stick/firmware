@@ -442,7 +442,8 @@ static esp_err_t km_token_generate_hmac(uint16_t size, km_key_usage_t usage,
     return ESP_ERR_INVALID_ARG;
   }
 
-  return km_se_worker_generate_hmac(token_metadata.se_hmac_id, size, usage, key_id);
+  return km_se_worker_generate_hmac(token_metadata.se_hmac_id, size, usage,
+                                    key_id);
 }
 
 esp_err_t km_token_generate_key(km_key_type_t type, uint16_t bits,
@@ -568,6 +569,32 @@ esp_err_t km_token_sign_ec_ecdsa(km_memory_pool_t *pool, km_key_metadata_t *key,
 
   esp_err_t status = km_se_worker_sign_ec_ecdsa(pool, key, message, message_len,
                                                 signature, signature_len);
+  return status;
+}
+
+esp_err_t km_token_sign_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                             uint8_t *message, size_t message_len,
+                             uint8_t **mac, size_t *mac_len) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform sign before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status =
+      km_se_worker_sign_hmac(pool, key, message, message_len, mac, mac_len);
+  return status;
+}
+
+esp_err_t km_token_verify_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                               uint8_t *message, size_t message_len,
+                               uint8_t *mac, size_t mac_len, bool *verified) {
+  if (!token_metadata_loaded) {
+    ESP_LOGE(TAG, "Cannot perform verify before token metadata is loaded");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t status = km_se_worker_verify_hmac(pool, key, message, message_len,
+                                              mac, mac_len, verified);
   return status;
 }
 

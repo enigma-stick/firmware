@@ -213,6 +213,52 @@ km_command_response_sign_serialize(km_memory_pool_t *pool,
   return len;
 }
 
+bool km_command_verify_deserialize(km_memory_pool_t *pool,
+                                   const uint8_t *payload, size_t len,
+                                   km_command_verify_t *out) {
+  if (!out) {
+    return false;
+  }
+
+  km_command_verify_t command;
+  km_deserializer_t *dz = km_dz_init_copy(pool, payload, len);
+
+  uint32_t message_len = 0;
+  uint32_t signature_len = 0;
+
+  if (!km_dz_u32(dz, &command.key_id) || !km_dz_u32(dz, &message_len)) {
+    return false;
+  }
+  command.message_len = message_len;
+  command.message = km_memory_alloc(pool, command.message_len);
+  km_dz_array(km_dz_u8, dz, command.message, command.message_len);
+
+  if (!km_dz_u32(dz, &signature_len)) {
+    return false;
+  }
+  command.signature_len = signature_len;
+  command.signature = km_memory_alloc(pool, command.signature_len);
+  km_dz_array(km_dz_u8, dz, command.signature, command.signature_len);
+
+  *out = command;
+  return true;
+}
+
+size_t km_command_response_verify_serialize(
+    km_memory_pool_t *pool, const km_command_response_verify_t *response,
+    uint8_t **out) {
+  km_serializer_t *sz = km_sz_init(KEYMGR_SZ_DEFAULT_ALLOC);
+
+  km_sz_u8(sz, response->verified);
+
+  size_t len = sz->len;
+  *out = km_memory_alloc(pool, len);
+  memcpy(*out, sz->data, len);
+  km_sz_free(sz);
+
+  return len;
+}
+
 bool km_command_get_key_deserialize(km_memory_pool_t *pool,
                                     const uint8_t *payload, size_t len,
                                     km_command_get_key_t *out) {
@@ -598,6 +644,11 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
         km_token_sign_ec_ecdsa(pool, &key_meta, command.message,
                                command.message_len, &signature, &signature_len);
     break;
+  case km_key_type_hmac:
+    status =
+        km_token_sign_hmac(pool, &key_meta, command.message,
+                           command.message_len, &signature, &signature_len);
+    break;
   default:
     km_usb_write_error("Unsupported key type for requsted operation");
     goto cleanup;
@@ -626,6 +677,63 @@ static void km_command_handle_sign(const km_frame_header_t *frame_header,
   }
 
   km_usb_write_response(km_command_response_sign, out, out_len);
+
+cleanup:
+  km_memory_free(pool);
+}
+
+static void km_command_handle_verify(const km_frame_header_t *frame_header,
+                                     const uint8_t *payload) {
+  km_memory_pool_t *pool = km_memory_init(KEYMGR_MEMORY_DEFAULT_BYTES);
+
+  km_command_verify_t command;
+  if (!km_command_verify_deserialize(pool, payload, frame_header->length,
+                                     &command)) {
+    km_usb_write_error("Could not deserialize command");
+    goto cleanup;
+  }
+
+  km_key_metadata_t key_meta;
+  esp_err_t status = km_token_get_key_metadata(pool, command.key_id, &key_meta);
+  if (status != ESP_OK) {
+    km_usb_write_error("Could not retrieve key metadata");
+    goto cleanup;
+  }
+
+  bool verified = false;
+  switch (key_meta.type) {
+  case km_key_type_hmac:
+    status = km_token_verify_hmac(pool, &key_meta, command.message,
+                                  command.message_len, command.signature,
+                                  command.signature_len, &verified);
+    break;
+  default:
+    km_usb_write_error("Invalid key type");
+    goto cleanup;
+  }
+
+  if (status == KM_ERR_AUTH_REQUIRED) {
+    km_usb_write_response(km_command_response_auth_required, NULL, 0);
+    goto cleanup;
+  }
+
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "verify failed: %s", esp_err_to_name(status));
+    km_usb_write_error("Verify failed");
+    goto cleanup;
+  }
+
+  km_command_response_verify_t response;
+  response.verified = verified ? 1 : 0;
+
+  uint8_t *out;
+  size_t out_len = km_command_response_verify_serialize(pool, &response, &out);
+  if (out_len == 0) {
+    km_usb_write_error("Could not serialize response");
+    goto cleanup;
+  }
+
+  km_usb_write_response(km_command_response_verify, out, out_len);
 
 cleanup:
   km_memory_free(pool);
@@ -806,6 +914,9 @@ void km_commands_handle(km_app_context_t *ctx,
     break;
   case km_command_sign:
     km_command_handle_sign(frame_header, payload);
+    break;
+  case km_command_verify:
+    km_command_handle_verify(frame_header, payload);
     break;
   case km_command_get_key:
     km_command_handle_get_key(frame_header, payload);

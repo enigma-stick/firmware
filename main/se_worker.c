@@ -1401,6 +1401,161 @@ cleanup:
   return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
 }
 
+static esp_err_t se_worker_sign_hmac_impl(se_worker_context_t *ctx,
+                                          km_memory_pool_t *pool,
+                                          km_key_metadata_t *key,
+                                          uint8_t *message, size_t message_len,
+                                          uint8_t **mac, size_t *mac_len) {
+  if (pool == NULL || key == NULL || message == NULL || mac == NULL ||
+      mac_len == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *mac = NULL;
+  *mac_len = 0;
+
+  sss_object_t hmac_key = {0};
+  sss_mac_t mac_ctx = {0};
+  bool hmac_init = false;
+  bool mac_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&hmac_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize key handle");
+    goto cleanup;
+  }
+  hmac_init = true;
+
+  status = sss_key_object_get_handle(&hmac_key, key->id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not retrieve key handle");
+    goto cleanup;
+  }
+
+  sss_algorithm_t alg;
+  switch (key->size) {
+  case 256:
+    alg = kAlgorithm_SSS_HMAC_SHA256;
+    break;
+  case 512:
+    alg = kAlgorithm_SSS_HMAC_SHA512;
+    break;
+  default:
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_mac_context_init(&mac_ctx, (sss_session_t *)&ctx->session.sss,
+                                &hmac_key, alg, kMode_SSS_Mac);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize MAC context");
+    goto cleanup;
+  }
+  mac_init = true;
+
+  size_t capacity = key->size / 8;
+  uint8_t *out = km_memory_alloc(pool, capacity);
+  if (out == NULL) {
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  size_t out_len = capacity;
+  status = sss_mac_one_go(&mac_ctx, message, message_len, out, &out_len);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not perform HMAC signature");
+    goto cleanup;
+  }
+
+  *mac = out;
+  *mac_len = out_len;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (hmac_init)
+    sss_key_object_free(&hmac_key);
+  if (mac_init)
+    sss_mac_context_free(&mac_ctx);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t se_worker_verify_hmac_impl(se_worker_context_t *ctx,
+                                            km_memory_pool_t *pool,
+                                            km_key_metadata_t *key,
+                                            uint8_t *message,
+                                            size_t message_len, uint8_t *mac,
+                                            size_t mac_len, bool *verified) {
+  if (pool == NULL || key == NULL || message == NULL || mac == NULL ||
+      verified == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  *verified = false;
+
+  sss_object_t hmac_key = {0};
+  sss_mac_t mac_ctx = {0};
+  bool hmac_init = false;
+  bool mac_init = false;
+
+  esp_err_t err = se_worker_init_keystore(ctx);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  sss_status_t status = sss_key_object_init(&hmac_key, &ctx->key_store);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize key handle");
+    goto cleanup;
+  }
+  hmac_init = true;
+
+  status = sss_key_object_get_handle(&hmac_key, key->id);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not retrieve key handle");
+    goto cleanup;
+  }
+
+  sss_algorithm_t alg;
+  switch (key->size) {
+  case 256:
+    alg = kAlgorithm_SSS_HMAC_SHA256;
+    break;
+  case 512:
+    alg = kAlgorithm_SSS_HMAC_SHA512;
+    break;
+  default:
+    status = kStatus_SSS_Fail;
+    goto cleanup;
+  }
+
+  status = sss_mac_context_init(&mac_ctx, (sss_session_t *)&ctx->session.sss,
+                                &hmac_key, alg, kMode_SSS_Mac_Validate);
+  if (status != kStatus_SSS_Success) {
+    ESP_LOGE(TAG, "Could not initialize MAC context");
+    goto cleanup;
+  }
+  mac_init = true;
+
+  status = sss_mac_one_go(&mac_ctx, message, message_len, mac, &mac_len);
+
+  *verified = status == kStatus_SSS_Success;
+  ctx->last_activity = xTaskGetTickCount();
+
+cleanup:
+  if (hmac_init)
+    sss_key_object_free(&hmac_key);
+  if (mac_init)
+    sss_mac_context_free(&mac_ctx);
+
+  return status == kStatus_SSS_Success ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t se_worker_get_public_key_rsa_impl(se_worker_context_t *ctx,
                                                    km_memory_pool_t *pool,
                                                    km_key_metadata_t *key,
@@ -1584,6 +1739,8 @@ static bool se_request_requires_auth(se_request_type_t type) {
   case SE_REQUEST_DECRYPT_RSA_OAEP:
   case SE_REQUEST_SIGN_RSA_PSS:
   case SE_REQUEST_SIGN_EC_ECDSA:
+  case SE_REQUEST_SIGN_HMAC:
+  case SE_REQUEST_VERIFY_HMAC:
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
   case SE_REQUEST_GET_PUBLIC_KEY_EC:
   case SE_REQUEST_DESTROY_KEY:
@@ -1665,6 +1822,17 @@ static esp_err_t handle_request(se_worker_context_t *ctx,
         ctx, request->args.sign.pool, request->args.sign.key,
         request->args.sign.message, request->args.sign.message_len,
         request->args.sign.signature, request->args.sign.signature_len);
+  case SE_REQUEST_SIGN_HMAC:
+    return se_worker_sign_hmac_impl(
+        ctx, request->args.sign.pool, request->args.sign.key,
+        request->args.sign.message, request->args.sign.message_len,
+        request->args.sign.signature, request->args.sign.signature_len);
+  case SE_REQUEST_VERIFY_HMAC:
+    return se_worker_verify_hmac_impl(
+        ctx, request->args.verify.pool, request->args.verify.key,
+        request->args.verify.message, request->args.verify.message_len,
+        request->args.verify.signature, request->args.verify.signature_len,
+        request->args.verify.verified);
   case SE_REQUEST_GET_PUBLIC_KEY_RSA:
     return se_worker_get_public_key_rsa_impl(
         ctx, request->args.get_public_key.pool,
@@ -2059,6 +2227,56 @@ esp_err_t km_se_worker_sign_ec_ecdsa(km_memory_pool_t *pool,
   se_request_t *request_ptr = &request;
   if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
     ESP_LOGE(TAG, "Could not enqueue sign ec request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_sign_hmac(km_memory_pool_t *pool, km_key_metadata_t *key,
+                                 uint8_t *message, size_t message_len,
+                                 uint8_t **mac, size_t *mac_len) {
+  se_request_t request = {.type = SE_REQUEST_SIGN_HMAC,
+                          .args.sign = {.pool = pool,
+                                        .key = key,
+                                        .message = message,
+                                        .message_len = message_len,
+                                        .signature = mac,
+                                        .signature_len = mac_len}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue sign hmac request");
+    return ESP_FAIL;
+  }
+
+  xSemaphoreTake(request.completion, portMAX_DELAY);
+  return request.result;
+}
+
+esp_err_t km_se_worker_verify_hmac(km_memory_pool_t *pool,
+                                   km_key_metadata_t *key, uint8_t *message,
+                                   size_t message_len, uint8_t *mac,
+                                   size_t mac_len, bool *verified) {
+  se_request_t request = {.type = SE_REQUEST_VERIFY_HMAC,
+                          .args.verify = {.pool = pool,
+                                          .key = key,
+                                          .message = message,
+                                          .message_len = message_len,
+                                          .signature = mac,
+                                          .signature_len = mac_len,
+                                          .verified = verified}};
+
+  request.completion =
+      xSemaphoreCreateBinaryStatic(&request.completion_storage);
+
+  se_request_t *request_ptr = &request;
+  if (xQueueSend(ctx->queue, &request_ptr, portMAX_DELAY) != pdTRUE) {
+    ESP_LOGE(TAG, "Could not enqueue verify hmac request");
     return ESP_FAIL;
   }
 

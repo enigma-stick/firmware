@@ -62,6 +62,18 @@ typedef struct {
 
 typedef struct {
   uint32_t key_id;
+  uint8_t *message;
+  size_t message_len;
+  uint8_t *signature;
+  size_t signature_len;
+} km_command_verify_t;
+
+typedef struct {
+  uint8_t verified;
+} km_command_response_verify_t;
+
+typedef struct {
+  uint32_t key_id;
 } km_command_get_key_t;
 
 typedef struct {
