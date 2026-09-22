@@ -1,4 +1,5 @@
 #include "app.h"
+#include "btn.h"
 #include "crypto.h"
 #include "esp_log.h"
 #include "esp_log_buffer.h"
@@ -30,8 +31,9 @@ void app_main(void) {
   // Start SE05X worker
   ESP_ERROR_CHECK(km_se_worker_start());
 
-  // Set up lights
+  // Set up lights and buttons
   km_led_event_listener_start(&ctx);
+  km_btn_task_start(&ctx);
 
   // Set up USB handler
   km_usb_start(&ctx);

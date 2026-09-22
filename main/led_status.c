@@ -23,6 +23,12 @@ static void km_led_event_handler(void *ctx) {
       case km_led_event_busy_off:
         km_led_set(&led_red, false);
         break;
+      case km_led_event_reset_warning_on:
+        km_led_set(&led_blue, false);
+        break;
+      case km_led_event_reset_warning_off:
+        km_led_set(&led_blue, true);
+        break;
       }
     }
   }
@@ -53,4 +59,11 @@ void km_led_busy_off(km_app_context_t *ctx) {
   event.type = km_led_event_busy_off;
 
   xQueueSend(ctx->led_queue, &event, 0);
+}
+
+void km_led_reset_warning_set(km_app_context_t *ctx, bool on) {
+  km_led_event_t event = {.type = on ? km_led_event_reset_warning_on
+                                     : km_led_event_reset_warning_off};
+
+  xQueueSend(ctx->led_queue, &event, portMAX_DELAY);
 }
